@@ -1,138 +1,165 @@
 import numpy as np
-from skimage.color import rgb2lab
+import imageio.v3 as iio
+from skimage.color import rgb2lab, rgb2gray
 from skimage.filters import gaussian
 from skimage.measure import label
-from skimage.exposure import rescale_intensity, equalize_adapthist
-from scipy.ndimage import binary_fill_holes
-from skimage import exposure
+from skimage.exposure import rescale_intensity
+import argparse
+import logging
+import re
 
+logger = logging.getLogger(__name__)
 
-def phaseTHR(IMG, Phases, *args):
+LIGHTNESS_LIMITS = "1,99"
+
+def phase_threshold(image, phases, args):
     def imgaussfilt(img, sigma):
-        return gaussian(img, sigma=sigma, multichannel=True)
+        return gaussian(img, sigma=sigma)
 
     # Emulate MATLAB's `imadjust` using `skimage`'s `rescale_intensity`
     def imadjust(img, limits=None):
+        """
+        Adjust the image intensity (grayscale).
+        For uint8 images the output intensity levels are in range <0, 255>.
+        For float images the output intensity levels are in range <0, 1>.
+        When limits are specified, the intensity levels are rescaled to the given limits.
+        """
         if limits is None:
             return rescale_intensity(img)
-        return rescale_intensity(img, in_range=tuple(limits))
 
-    # Data preallocation
-    Nv = max(1, len(args))
-    Verbose = [{'Img': None, 'Command': ''} for _ in range(Nv)]
-    Used = [False] * Nv
+        # format "min, max"
+        in_range = tuple([float(value)
+                          for value in re.findall(r"([0-9\.]+)", limits)])
+        return rescale_intensity(img, in_range=in_range)
 
-    LABdistance = False
-    L_out = [1, 99]
+
+    verbose = []
 
     # Extract phases to be detected
-    Phases = [phase for phase in Phases if phase['Detect']]
+    phases_selected = [phase for phase in phases if phase['Detect']]
+    cracks_image = args.cracks
+    verbose.append({"command": "cracks", "img": cracks_image})
+    phases_count = len(phases_selected)
 
-    Cracks = np.zeros_like(IMG[:, :, 0])
-    Np = len(Phases)
-    Layers = [{'Map': None, 'Label': 'n/a', 'RGB': np.zeros(3), 'Partition': None, 'Numel': None, 'Count': None} for _
-              in range(Np + 1)]
+    # Set the output lightness limits.
+    lightness_limits = sorted([float(value.strip(" ")) for value in args.threshold.split(",")])
+    verbose.append({"command": "threshold", "img": image})
+    assert 0 < len(lightness_limits) < 3
 
-    ii = 0
-    while ii < len(args):
-        arg = args[ii].lower()
-        if arg in ['-ab', '-abdistance', '-record']:
-            Used[ii] = True
-            Verbose[ii]['Command'] = args[ii]
-            Verbose[ii]['Img'] = IMG
-            LABdistance = False
-            ii += 1
-        elif arg in ['-lab', '-labdistance']:
-            Used[ii] = True
-            Verbose[ii]['Command'] = args[ii]
-            Verbose[ii]['Img'] = IMG
-            LABdistance = True
-            ii += 1
-        elif arg == '-gauss':
-            Used[ii] = True
-            Verbose[ii]['Command'] = args[ii:ii + 2]
-            IMG = imgaussfilt(IMG, args[ii + 1])
-            Verbose[ii]['Img'] = IMG
-            ii += 2
-        elif arg in ['-imadjust', '-imadj']:
-            Used[ii] = True
-            if ii + 1 < Nv and isinstance(args[ii + 1], (tuple, list, np.ndarray)):
-                IMG = imadjust(IMG, args[ii + 1])
-                Verbose[ii]['Command'] = args[ii:ii + 2]
-                ii += 2
-            else:
-                IMG = imadjust(IMG)
-                Verbose[ii]['Command'] = args[ii]
-                ii += 1
-            Verbose[ii]['Img'] = IMG
-        elif arg in ['-thr', '-threshold']:
-            if ii + 1 < Nv and isinstance(args[ii + 1], (tuple, list, np.ndarray)):
-                if len(args[ii + 1]) == 1:
-                    L_out[0] = args[ii + 1][0]
-                elif len(args[ii + 1]) == 2:
-                    L_out = args[ii + 1]
-                else:
-                    warning('incorrect threshold values')
-                    L_out = args[ii + 1][:2]
-                Verbose[ii]['Command'] = args[ii:ii + 2]
-                Verbose[ii]['Img'] = IMG
-                ii += 2
-            else:
-                warning('no threshold defined, default used instead.')
-                ii += 1
-        elif arg == '-cracks':
-            Cracks = args[ii + 1]
-            Verbose[ii]['Command'] = args[ii:ii + 2]
-            Verbose[ii]['Img'] = Cracks
-            ii += 2
-        else:
-            ii += 1
+    # Rescale image intensity into specified range
+    img = imadjust(image, args.adjust_intensity)
+    verbose.append({"command": f"adjust_intensity={args.adjust_intensity}", "img": img})
 
-    Cracks = Cracks.astype(float)
-    LAB = rgb2lab(IMG)
-    Markers = rgb2lab(np.array([phase['Colors'] for phase in Phases]))
-    IL = LAB[:, :, 0] * ~Cracks
-    IA = LAB[:, :, 2] * ~Cracks
-    IB = LAB[:, :, 1] * ~Cracks
-    ML = Markers[:, 0]
-    MA = Markers[:, 1]
-    MB = Markers[:, 2]
+    if args.gaussian_blur != 0:
+        img = imgaussfilt(img, args.gaussian_blur)
+        verbose.append({"command": f"gaussian_blur={args.gaussian_blur}", "img": img})
 
-    Distances = np.empty((IL.shape[0], IL.shape[1], Np))
-    for ii in range(Np):
-        if LABdistance:
-            Distances[:, :, ii] = np.sqrt((IA - MA[ii]) ** 2 + (IB - MB[ii]) ** 2 + (IL - ML[ii]) ** 2)
-        else:
-            Distances[:, :, ii] = np.sqrt((IA - MA[ii]) ** 2 + (IB - MB[ii]) ** 2)
+    cracks_image = cracks_image.astype(float)
+    img_lab = rgb2lab(img)
+    phases_color_lab = rgb2lab(np.array([phase['Colors'] for phase in phases_selected]))
 
-    Map = np.argmin(Distances, axis=2) + 1  # MATLAB is 1-indexed, Python is 0-indexed
-    Map[IL < L_out[0]] = 0
-    Map[IL > L_out[2]] = 0
+    # TODO: Use CIE DE2000 instead of eucledian distance here
+    img_without_cracks_lab = np.copy(img_lab)
+    img_without_cracks_lab[cracks_image.astype(bool), :] = 0
+    if args.lab_distance:
+        verbose.append({"command": "lab_distance", "img": img_without_cracks_lab})
+        distances = np.array([
+            np.linalg.norm(img_without_cracks_lab.reshape(-1, 3) - phase_color_lab, axis=1)
+            for phase_color_lab in phases_color_lab
+        ]).reshape(img_lab.shape[0], img_lab.shape[1], phases_count)
+    elif args.ab_distance:
+        verbose.append({"command": "ab_distance", "img": img_without_cracks_lab})
+        distances = np.array([
+            np.linalg.norm(img_without_cracks_lab[:,:,1:].reshape(-1, 2) - phase_color_lab[1:])
+            for phase_color_lab in phases_color_lab
+        ]).reshape(img_lab.shape[0], img_lab.shape[1], phases_count)
+    else:
+        raise Exception("No distance computation specified.")
 
-    for ii in range(Np):
-        MapII = Map == ii + 1
-        Layers[ii]['Map'] = MapII
-        Layers[ii]['Label'] = Phases[ii]['Labels']
-        Layers[ii]['RGB'] = Phases[ii]['Colors']
-        Layers[ii]['Numel'] = np.sum(MapII)
-        Layers[ii]['Partition'] = Layers[ii]['Numel'] / MapII.size
-        Layers[ii]['Count'] = np.max(label(MapII))
+    phase_map_img = np.argmin(distances, axis=2)
+    phase_map_img[img_without_cracks_lab[:,:,0] < lightness_limits[0]] = 0
+    phase_map_img[img_without_cracks_lab[:,:,0] > lightness_limits[1]] = 0
 
-    MapII = ~Map
-    Layers[-1]['Map'] = MapII
-    Layers[-1]['Numel'] = np.sum(MapII)
-    Layers[-1]['Partition'] = Layers[-1]['Numel'] / MapII.size
-    Layers[-1]['Count'] = np.max(label(MapII))
-
-    return Map, Layers, Verbose
+    layers = []
+    for i in range(phases_count):
+        phase_mask = (phase_map_img == i)
+        layers.append({
+            'mask': phase_mask,
+            'label': phases_selected[i]['Labels'],
+            'rgb': phases_selected[i]['Colors'],
+            'pixel_count': np.sum(phase_mask),
+            'pixel_ratio': np.sum(phase_mask) / phase_mask.size,
+            'segments_count': np.max(label(phase_mask))
+        })
+    nophase_mask = phase_map_img != 0
+    layers.append({
+        'mask': nophase_mask,
+        'Label': 'n/a',
+        'rgb': np.zeros(3),
+        'pixel_count': np.sum(nophase_mask),
+        'pixel_ratio': np.sum(nophase_mask) / nophase_mask.size,
+        'segments_count': np.max(label(nophase_mask))
+    })
+    return phase_map_img, layers, verbose
 
 
-# Example usage placeholder for IMG and Phases
-IMG = np.random.rand(100, 100, 3)  # Randomly generated sample image
-Phases = [{'Detect': True, 'Colors': [255, 0, 0], 'Labels': 'Phase 1'},
+# Example usage placeholder for IMG and phases
+img = np.random.rand(100, 100, 3)  # Randomly generated sample image
+phases = [{'Detect': True, 'Colors': [255, 0, 0], 'Labels': 'Phase 1'},
           {'Detect': True, 'Colors': [0, 255, 0], 'Labels': 'Phase 2'},
           {'Detect': False, 'Colors': [0, 0, 255], 'Labels': 'Phase 3'}]
-
 # Execute
-Map, Layers, Verbose = phaseTHR(IMG, Phases, '-gauss', 1, '-imadjust', '-thr', [5, 95], '-cracks',
-                                np.zeros_like(IMG[:, :, 0]))
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="""
+    Configure arguments for phase threshold function. 
+    AB denotes a* and b* dimensions in La*b* color space. 
+    One of --ab_distance or --lab_distance must be set.
+    """)
+
+    parser.add_argument(
+        '--ab_distance',
+        action='store_true',
+        required=False,
+        help="Set AB distance calculation to False")
+    parser.add_argument(
+        '--lab_distance',
+        action='store_true',
+        required=False,
+        help="Set La*b* distance calculation to True")
+    parser.add_argument(
+        '--gaussian_blur',
+        type=float,
+        required=False,
+        help="Apply gaussian filter with given sigma value",
+        default=0)
+    parser.add_argument(
+        '--adjust_intensity',
+        type=str,
+        required=False,
+        help="""Adjust the image intensity from specified range. 
+        Format should be "min, max".""")
+    parser.add_argument(
+        '-t',
+        '--threshold',
+        type=str,
+        required=False,
+        help="Set thresholds. Takes 1 or 2 values, separated by comma.",
+        default=LIGHTNESS_LIMITS)
+    parser.add_argument(
+        '--cracks',
+        type=str,
+        required=False,
+        help="Path to crack mask image",
+        default=None
+    )
+
+    args = parser.parse_args()
+
+    if args.cracks is None:
+        # Use empty image when no crack map is linked
+        args.cracks = np.zeros_like(img[:, :, 0])
+    else:
+        args.cracks = rgb2gray(iio.imread(args.cracks))
+
+    map, layers, verbose = phase_threshold(img, phases, args)
