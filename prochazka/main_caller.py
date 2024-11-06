@@ -128,7 +128,7 @@ def main_caller(ch_phases):
 
                     plt.imshow(map2, alpha=1 - mask)
                     plt.colorbar()
-                    plt.title('Phases processed')
+                    plt.title('phases processed')
                     plt.savefig(os.path.join(main_folder, samples[ii], 'EDX_assign', filename + '.png'))
 
                     t = datetime.datetime.now()

@@ -73,8 +73,9 @@ class Phase:
         self.Labels = labels
 
 
-# Replace placeholder data with actual data
-cracks = [Crack(np.random.randint(0, 5, (10, 4)), np.random.randint(0, 5, (10, 2))) for _ in range(10)]
-phases = [Phase(f'Phase {i}') for i in range(5)]
+if __name__ == "__main__":
+    # Replace placeholder data with actual data
+    cracks = [Crack(np.random.randint(0, 5, (10, 4)), np.random.randint(0, 5, (10, 2))) for _ in range(10)]
+    phases = [Phase(f'Phase {i}') for i in range(5)]
 
-counts, lengths, n, l = cracksCount(cracks, phases)
+    counts, lengths, n, l = cracksCount(cracks, phases)

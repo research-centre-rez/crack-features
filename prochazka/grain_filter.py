@@ -37,7 +37,7 @@ def grainFilter(GrainStruct, GrainMap, Layers, SizeLimit=9000):
     GrainMap[GrainMap == 0] = len(GrainStruct)
 
     for layer in Layers:
-        layer['Children'] = np.unique(GrainMap[layer['Map'] > 0])
+        layer['Children'] = np.unique(GrainMap[layer['mask'] > 0])
 
     Bars2 = weight_counts(np.array([grain['Numel'] for grain in GrainStruct]), Bins, normalization='probability')
     X = Bins[:-1] + np.diff(Bins)
@@ -71,10 +71,11 @@ class Layer:
         self.Children = []
 
 
-# You need to replace the following with your actual GrainStruct and Layers
-GrainStruct = [{'Numel': np.random.randint(1000, 10000)} for _ in range(10)]
-GrainMap = np.random.randint(0, len(GrainStruct), (100, 100))
-Layers = [{'Map': np.random.randint(0, 2, (100, 100))} for _ in range(5)]
+if __name__ == "__main__":
+    # You need to replace the following with your actual GrainStruct and Layers
+    GrainStruct = [{'Numel': np.random.randint(1000, 10000)} for _ in range(10)]
+    GrainMap = np.random.randint(0, len(GrainStruct), (100, 100))
+    Layers = [{'mask': np.random.randint(0, 2, (100, 100))} for _ in range(5)]
 
-# Execute
-grainFilter(GrainStruct, GrainMap, Layers, SizeLimit=9000)
+    # Execute
+    grainFilter(GrainStruct, GrainMap, Layers, SizeLimit=9000)

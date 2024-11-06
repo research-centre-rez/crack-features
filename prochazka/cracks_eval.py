@@ -1,151 +1,184 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from skimage.morphology import disk, skeletonize
 from skimage.measure import label
-from scipy.ndimage import binary_dilation, binary_hit_or_miss
+from scipy.ndimage import binary_dilation
+# bw_morph is python code simulating MATLAB bwmorph lib
+from bw_morph import endpoints, branches
 
 
-def cracksEval(PhaseIMG, Cracks, Phases, ThRadius, InRadius):
-    plt.close('all')
-    fig, axs = plt.subplots(1, 2, figsize=(19.20, 9.73))
-    axs[0].imshow(PhaseIMG, cmap='gray')
-    axs[1].imshow(PhaseIMG, cmap='gray')
+def crack_metadata(crack, dilation_radius=5):
+    segment_labels = crack["segment_labels"]
+    outline = np.logical_xor(
+        binary_dilation(segment_labels, structure=disk(dilation_radius)),
+        segment_labels)
 
-    NC = len(Cracks)
-    MI, NI = PhaseIMG.shape
+    outline_skeleton = skeletonize(np.logical_or(outline, segment_labels))
+    skeleton_outline_pixel_count = np.sum(outline_skeleton)
+    end_points = np.column_stack(np.where(endpoints(outline_skeleton)))
+    nodes = branches(outline_skeleton)
 
-    # Add not-assigned phase (0 in PhaseIMG)
-    Phases.append({
-        'Mask': PhaseIMG == 0,
+    nodes_coords = np.column_stack(np.where(nodes))
+
+    return {
+        "segment_labels": segment_labels,
+        "outline": outline,
+        "outline_skeleton": outline_skeleton,
+        "skeleton_outline_pixel_count": skeleton_outline_pixel_count,
+        "end_points_coords": end_points,
+        "nodes": {
+            "mask": nodes,
+            "coords": nodes_coords
+        }
+    }
+
+
+def point_metadata(x, y, skeleton_branches, image_shape):
+    height, width = image_shape
+    return {
+        'xy': [x, y],
+        # branches contains array of branch numbers near [-4,+4] the endpoint
+        'Branches': np.unique(skeleton_branches[
+                              max(0, y - 4):min(height, y + 5),
+                              max(0, x - 4):min(width, x + 5)
+                              ])[1:],
+        'IsEnd': True,
+        'IsTerminal': False
+    }
+
+
+def get_skeleton_branches(skeleton, skeleton_nodes):
+    # Create a structuring element (disk with radius 2)
+    structuring_element = disk(2)
+
+    # Perform binary dilation on bw_skeleton_nodes
+    dilated_nodes = binary_dilation(skeleton_nodes, structuring_element)
+
+    # Subtract the dilated image from bw_skeleton and check where it's greater than 0
+    binary_diff = (skeleton - dilated_nodes) > 0
+
+    # Label the regions in the binary_diff image
+    return label(binary_diff)
+
+
+def cracks_evaluation(phase_img, cracks, phases, dilation_radius):
+    """
+    Processing of the prepared segmentation maps
+
+    @param phase_img - segmentation map from the miscroscope according to pixel-material phase
+    @param cracks - list of cracks (@see ... TODO)
+    """
+
+    # Add not-assigned phase (0 in phase_img)
+    phases.append({
+        'Mask': phase_img == 0,
         'Label': 'n/a',
         'LABcolor': [0, 0, 0],
         'GRBcolor': [0, 0, 0],
-        'AreaPx': np.sum(PhaseIMG == 0)
+        'area_pixel_count': np.sum(phase_img == 0)
     })
-    LayerID = PhaseIMG.copy()
-    LayerID[PhaseIMG == 0] = len(Phases)
+    layer_ids = phase_img.copy()
+    layer_ids[phase_img == 0] = len(phases)
 
-    CracksList = list(range(NC))
+    for crack in cracks:
+        metadata = crack_metadata(crack, dilation_radius)
+        skeleton_branches, branches_count = get_skeleton_branches(
+            metadata['outline_skeleton'],
+            metadata['nodes']['mask']
+        )
+        points = [point_metadata(x, y, skeleton_branches, phase_img.shape)
+                  for x, y in metadata["end_points"]]
+        points.extend([point_metadata(x, y, skeleton_branches, phase_img.shape)
+                       for x, y in metadata["nodes"]["coords"]])
 
-    for ii in CracksList:
-        print(f'{ii + 1} / {NC}')
-        Meat = Cracks[ii]['Meat'].toarray()  # Ensure you have sparse matrix support
-        Outline = binary_dilation(Meat, structure=disk(ThRadius)) ^ Meat
-        Skel = skeletonize(Outline | Meat)
-        Cracks[ii]['SkelPxJP'] = np.sum(Skel)
+        skeletons_endpoints_distance = [
+            np.linalg.norm(metadata["end_points"] - endpoint, axis=1)
+            for endpoint in metadata["end_points"]
+        ]
 
-        l, k = np.where(binary_hit_or_miss(Skel))
-
-        if len(l) == 0:
-            L, K = np.nonzero(Skel)
-            L, K = L[0], K[0]
-            Skel[L, K] = 0
-            l, k = np.where(binary_hit_or_miss(Skel))
-            l = np.append(l, L)
-            k = np.append(k, K)
-            Sk = np.zeros_like(Skel)
-            Sk[l[0], k[0]] = 1
-            Sk[l[1], k[1]] = 1
-            axs[1].imshow(Outline + Meat + Skel + Sk, cmap='gray')
-
-        EndPoints = np.column_stack((k, l))
-
-        Nods = binary_hit_or_miss(Skel)
-        Branches = label(Skel & (~binary_dilation(Nods, structure=disk(2))))
-        l, k = np.where(Nods)
-        NodPoints = np.column_stack((k, l))
-
-        EndStruct = [{'xy': [k_, l_],
-                      'Branches': np.unique(Branches[max(0, l_ - 4):min(MI, l_ + 5), max(0, k_ - 4):min(NI, k_ + 5)])[
-                                  1:], 'IsEnd': True, 'IsTerminal': False} for k_, l_ in EndPoints]
-
-        Distances = np.zeros((len(EndPoints), len(EndPoints)))
-        for jj, (k_, l_) in enumerate(EndPoints):
-            Points = np.array([es['xy'] for es in EndStruct])
-            XY = Points - [k_, l_]
-            Distances[:, jj] = np.sqrt(np.sum(XY ** 2, axis=1))
-
-        Hits = np.unravel_index(Distances.argmax(), Distances.shape)
+        Hits = np.unravel_index(
+            skeletons_endpoints_distance.argmax(),
+            skeletons_endpoints_distance.shape
+        )
         for hit in Hits:
-            EndStruct[hit]['IsTerminal'] = True
+            endpoints[hit]['IsTerminal'] = True
 
-        NodStruct = [{'xy': [k_, l_],
-                      'Branches': np.unique(Branches[max(0, l_ - 4):min(MI, l_ + 5), max(0, k_ - 4):min(NI, k_ + 5)])[
-                                  1:], 'IsEnd': False, 'IsTerminal': False} for k_, l_ in zip(k, l)]
+        incident_points = np.array([point['Branches'] for point in points]).T
+        branch_struct = [{
+            'mask': branches == branch_id,
+            'Nodes': np.where(incident_points == branch_id)[0],
+            'xy': np.column_stack(np.nonzero(branches == branch_id)),
+            'OnEdge': [],
+            'Through': []
+        } for branch_id in range(branches_count)]
 
-        NodStruct.extend(EndStruct)
+        for branch_id in range(branches_count):
+            branch_struct[branch_id] = sortPoints(branch_struct[branch_id], points)
+            phases, Is = sniffSides(branch_struct[branch_id], phase_img)
+            phases = phases[(phases.min(axis=1) != 0), :]  # Remove zero-phase entries
+            branch_struct[branch_id]['Through'] = phases[(phases[:, 0] == phases[:, 1])]
+            branch_struct[branch_id]['OnEdge'] = phases[(phases[:, 0] != phases[:, 1])]
 
-        NBranch = Branches.max()
-        IncidentPoints = np.array([ns['Branches'] for ns in NodStruct]).T
-        BranchStruct = [{'Map': Branches == jj + 1, 'Nodes': np.where(IncidentPoints == jj + 1)[0],
-                         'xy': np.column_stack(np.nonzero(Branches == jj + 1)), 'OnEdge': [], 'Through': []} for jj in
-                        range(NBranch)]
-
-        for jj in range(NBranch):
-            BranchStruct[jj] = sortPoints(BranchStruct[jj], NodStruct)
-            Phs, Is = sniffSides(BranchStruct[jj], PhaseIMG)
-            Phs = Phs[(Phs.min(axis=1) != 0), :]  # Remove zero-phase entries
-            BranchStruct[jj]['Through'] = Phs[(Phs[:, 0] == Phs[:, 1])]
-            BranchStruct[jj]['OnEdge'] = Phs[(Phs[:, 0] != Phs[:, 1])]
-
-        Through = np.vstack([bs['Through'] for bs in BranchStruct])
-        OnEdge = np.vstack([bs['OnEdge'] for bs in BranchStruct])
+        Through = np.vstack([bs['Through'] for bs in branch_struct])
+        OnEdge = np.vstack([bs['OnEdge'] for bs in branch_struct])
 
         Unq = np.unique(Through)
-        Unq = np.column_stack((Unq, [Phases[u]['PhaseID'] for u in Unq], [np.sum(Through == u) for u in Unq]))
-        Cracks[ii]['Through'] = Unq
+        Unq = np.column_stack((Unq, [phases[u]['PhaseID'] for u in Unq], [np.sum(Through == u) for u in Unq]))
+        crack['Through'] = Unq
 
         OnEdge = OnEdge[np.argsort(OnEdge, axis=1)]
         Unq = np.unique(OnEdge, axis=0)
-        Unq = np.column_stack((Unq, [Phases[Unq[j, 0]]['PhaseID'] for j in range(Unq.shape[0])],
-                               [Phases[Unq[j, 1]]['PhaseID'] for j in range(Unq.shape[0])],
+        Unq = np.column_stack((Unq, [phases[Unq[j, 0]]['PhaseID'] for j in range(Unq.shape[0])],
+                               [phases[Unq[j, 1]]['PhaseID'] for j in range(Unq.shape[0])],
                                [np.sum(np.prod(Unq[j, :2] == OnEdge, axis=1)) for j in range(Unq.shape[0])]))
-        Cracks[ii]['OnEdge'] = Unq
+        crack['OnEdge'] = Unq
 
-    Cracks = [Cracks[i] for i in CracksList]
-    return Cracks, NodStruct, BranchStruct
+    return cracks, points, branch_struct
 
 
-def sniffSides(BStruct, Map):
-    sN = BStruct['xy'].shape[0]
-    I = np.full((sN, 4), np.nan)
-    Ph = np.full((sN, 2), np.nan)
+def sniffSides(branch_struct, mask):
+    branch_points_count = branch_struct['xy'].shape[0]
+    I = np.full((branch_points_count, 4), np.nan)
+    Ph = np.full((branch_points_count, 2), np.nan)
 
-    for si in range(sN):
-        i1 = max(si - 1, 1)
-        i2 = min(si + 1, sN)
-        I1 = BStruct['xy'][i2 - 1, ::-1]
-        I2 = BStruct['xy'][i1 - 1, ::-1]
-        T = I2 - I1
-        N = np.matmul(T, [[0, -1], [1, 0]]) / np.linalg.norm(T)
-        J0 = BStruct['xy'][si, ::-1]
+    for branch_point_id in range(branch_points_count):
+        low_bid = max(branch_point_id - 1, 1)
+        high_bid = min(branch_point_id + 1, branch_points_count)
+        high_bid_coords = branch_struct['xy'][high_bid - 1, ::-1]
+        low_bid_coords = branch_struct['xy'][low_bid - 1, ::-1]
+        derivative = low_bid_coords - high_bid_coords
+        branch_norm = np.matmul(derivative, [[0, -1], [1, 0]]) / np.linalg.norm(derivative)
 
-        IsPhase = False
+        branch_point_xy = branch_struct['xy'][branch_point_id, ::-1]
+
+        is_phase = False
         kk = 1
 
-        while not IsPhase:
-            J1 = np.minimum(np.maximum(J0 - kk * N, [1, 1]), [Map.shape[0], Map.shape[1]])
+        # find, in the direction of the norm a phase pixel?
+        while not is_phase:
+            J1 = np.minimum(
+                np.maximum(branch_point_xy - kk * branch_norm, [1, 1]),
+                            [mask.shape[0], mask.shape[1]])
             J1 = np.round(J1).astype(int) - 1
-            if np.all(J0 - kk * N == J1):
-                IsPhase = Map[J1[0], J1[1]] != 0
+            if np.all(branch_point_xy - kk * branch_norm == J1):
+                is_phase = mask[J1[0], J1[1]] != 0
             else:
-                IsPhase = True
+                is_phase = True
             kk += 1
 
-        IsPhase = False
+        is_phase = False
         kk = 1
 
-        while not IsPhase:
-            J2 = np.minimum(np.maximum(J0 + kk * N, [1, 1]), [Map.shape[0], Map.shape[1]])
+        while not is_phase:
+            J2 = np.minimum(np.maximum(branch_point_xy + kk * branch_norm, [1, 1]), [mask.shape[0], mask.shape[1]])
             J2 = np.round(J2).astype(int) - 1
-            if np.all(J0 + kk * N == J2):
-                IsPhase = Map[J2[0], J2[1]] != 0
+            if np.all(branch_point_xy + kk * branch_norm == J2):
+                is_phase = mask[J2[0], J2[1]] != 0
             else:
-                IsPhase = True
+                is_phase = True
             kk += 1
 
-        I[si, :] = [J1[0], J1[1], J2[0], J2[1]]
-        Ph[si, :] = [Map[J1[0], J1[1]], Map[J2[0], J2[1]]]
+        I[branch_point_id, :] = [J1[0], J1[1], J2[0], J2[1]]
+        Ph[branch_point_id, :] = [mask[J1[0], J1[1]], mask[J2[0], J2[1]]]
 
     return Ph, I
 
@@ -155,7 +188,7 @@ def sortPoints(BranchStruct, NodStruct):
     return BranchStruct
 
 
-# Example usage, placeholder for constructing Cracks and Phases
+# Example usage, placeholder for constructing cracks and phases
 class Crack:
     def __init__(self, meat):
         self.Meat = meat
@@ -169,11 +202,11 @@ class Phase:
         self.PhaseID = phaseID
         self.Label = label
 
+if __name__ == '__main__':
+    # You need to replace the following with your actual cracks and phases
+    Cracks = [Crack(np.random.random((10, 10)) > 0.5) for _ in range(10)]
+    Phases = [Phase(i, f"Phase {i}") for i in range(5)]
+    PhaseIMG = np.random.randint(0, len(Phases), (100, 100))
 
-# You need to replace the following with your actual Cracks and Phases
-Cracks = [Crack(np.random.random((10, 10)) > 0.5) for _ in range(10)]
-Phases = [Phase(i, f"Phase {i}") for i in range(5)]
-PhaseIMG = np.random.randint(0, len(Phases), (100, 100))
-
-# Execute
-Cracks, NodStruct, BranchStruct = cracksEval(PhaseIMG, Cracks, Phases, ThRadius=2, InRadius=2)
+    # Execute
+    Cracks, NodStruct, BranchStruct = cracks_evaluation(PhaseIMG, Cracks, Phases, dilation_radius=2, InRadius=2)

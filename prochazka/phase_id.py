@@ -7,17 +7,17 @@ from datetime import datetime
 def phaseID(Layers, *args):
     def layers2allMaps(AllLayers):
         NL = len(AllLayers)
-        Maps = np.zeros_like(AllLayers[0]['Map'])
+        Maps = np.zeros_like(AllLayers[0]['mask'])
         for LMi in range(NL - 1):
-            Maps[AllLayers[LMi]['Map'] > 0] = LMi + 1  # MATLAB is 1-indexed, Python is 0-indexed
+            Maps[AllLayers[LMi]['mask'] > 0] = LMi + 1  # MATLAB is 1-indexed, Python is 0-indexed
         return Maps
 
     def allMaps2Layers(AllLayers, Map):
         Indices = np.unique(Map)
         Indices = Indices[Indices > 0]  # Exclude index 0
         for idx in Indices:
-            AllLayers[idx - 1]['Map'] = Map == idx
-        AllLayers[-1]['Map'] = Map == 0
+            AllLayers[idx - 1]['mask'] = Map == idx
+        AllLayers[-1]['mask'] = Map == 0
         return AllLayers
 
     def extrapolateNI(ENLayers, ENMap):
@@ -50,15 +50,15 @@ def phaseID(Layers, *args):
 
         CSN = len(CSLayers)
         for cSi in range(CSN - 1):
-            Map = CSLayers[cSi]['Map']
+            Map = CSLayers[cSi]['mask']
             Map2 = opening(Map, Probe)
-            CSLayers[cSi]['Map'] = Map2
-            CSLayers[-1]['Map'][np.logical_xor(Map, Map2)] = 1
+            CSLayers[cSi]['mask'] = Map2
+            CSLayers[-1]['mask'][np.logical_xor(Map, Map2)] = 1
         return CSLayers
 
     T0 = datetime.now()
     Nv = max(1, len(args))
-    Verbose = [{'Layers': None, 'Map': None, 'Command': ''} for _ in range(Nv)]
+    Verbose = [{'Layers': None, 'mask': None, 'Command': ''} for _ in range(Nv)]
     Used = [False] * Nv
     FillCracks = True
 
@@ -72,12 +72,12 @@ def phaseID(Layers, *args):
             Layers = cleanSpikes(Layers, args[ii + 1])
             TheMap = layers2allMaps(Layers)
             Used[ii] = True
-            Verbose[ii].update({'Layers': Layers, 'Map': TheMap, 'Command': args[ii:ii + 2]})
+            Verbose[ii].update({'Layers': Layers, 'mask': TheMap, 'Command': args[ii:ii + 2]})
             ii += 2
         elif args[ii].lower() in ['-extrapolateni', '-ni', '-extrapolate']:
             Layers, TheMap = extrapolateNI(Layers, TheMap)
             Used[ii] = True
-            Verbose[ii].update({'Layers': Layers, 'Map': TheMap, 'Command': args[ii]})
+            Verbose[ii].update({'Layers': Layers, 'mask': TheMap, 'Command': args[ii]})
             ii += 1
         else:
             ii += 1
@@ -88,7 +88,7 @@ def phaseID(Layers, *args):
         Layers = allMaps2Layers(Layers, TheMap)
     else:
         TheMap[Cracks > 0] = 0
-        Verbose.append({'Layers': Layers, 'Map': TheMap, 'Command': ['-cracks', Cracks]})
+        Verbose.append({'Layers': Layers, 'mask': TheMap, 'Command': ['-cracks', Cracks]})
 
     T1 = datetime.now()
     print(f'phaseID: {T1 - T0}')
@@ -96,8 +96,8 @@ def phaseID(Layers, *args):
 
 
 # Example usage placeholder for Layers
-Layers = [{'Label': 'Layer1', 'Map': np.random.randint(0, 2, (100, 100))} for _ in range(3)]
-Layers.append({'Label': 'Not assigned', 'Map': np.zeros((100, 100))})
+Layers = [{'Label': 'Layer1', 'mask': np.random.randint(0, 2, (100, 100))} for _ in range(3)]
+Layers.append({'Label': 'Not assigned', 'mask': np.zeros((100, 100))})
 
 # Execute
 Layers, TheMap, Verbose = phaseID(Layers, '-spikes', 3, '-extrapolate')

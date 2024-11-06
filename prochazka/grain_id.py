@@ -1,93 +1,48 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage.morphology import disk, opening, dilation, label
-from skimage.color import label2rgb
+from tqdm.auto import tqdm
 from datetime import datetime
+import logging
+
+GRAIN_STRUCT_ELEMENT = disk(10)
+SUBGRAIN_STRUCT_ELEMENT = disk(5)
+
+logger = logging.getLogger(__name__)
 
 
-def grainID2(Map, Layers):
-    T0 = datetime.now()
+def grainID2(phase_map):
+    start_time = datetime.now()
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-    ax1.imshow(Map, cmap='gray')
+    # Label individual grains in phase_id-th phase
+    labeled_phase_map = label(phase_map, background=0)
+    # Do opening of these grains (i.e. erosion and dilation) - this removes long threads (grains do not have threads)
+    grains_open = opening(labeled_phase_map, GRAIN_STRUCT_ELEMENT)
+    # relabel opened grains
+    sub_grains = label(grains_open, background=0)
+    # dilate relabeled opened grains, but remove pixels belonging to a crack.
+    # This way we mark relevant areas with the closest grain_id
+    the_grains = dilation(sub_grains, SUBGRAIN_STRUCT_ELEMENT) * (labeled_phase_map > 0).astype(int)
+    # There are some residua from the phase map, which were not attached to any grain
+    # These leftovers should be managed as follows:
+    # 1. for their outline find intersection with a grain
+    # 2a. if no such grain exists then the leftover belongs to a crack
+    # 2b. if such grain exists compute the most frequent one (by means of pixels) and attach leftover to this grain
+    leftovers = label(np.logical_xor(labeled_phase_map > 0, the_grains.astype(bool)))
+    leftovers_dilated = dilation(leftovers, disk(2))
+    leftovers_outline = np.logical_xor(leftovers, leftovers_dilated)
+    leftovers_outline_grain_overlap = the_grains * leftovers_outline
+    # remove all leftovers (now are cracks)
+    the_grains[leftovers != 0] = 0
+    # for leftovers overlapping with its outline some grains attach those leftovers to grains
+    attachable_leftovers = np.unique((leftovers_outline_grain_overlap != 0) * leftovers_dilated)[1:]
+    for leftover_id in tqdm(attachable_leftovers, total=attachable_leftovers.size):
+        leftover_mask = leftovers_dilated == leftover_id
+        grain_ids, counts = np.unique(leftover_mask * leftovers_outline_grain_overlap, return_counts=True)
+        assert grain_ids.size != 1, f"{grain_ids} attached to this leftover outline do not match outline intersection with grains"
+        attached_grain_id = grain_ids[grain_ids != 0][np.argsort(counts[grain_ids != 0])[0]]
+        the_grains[leftover_mask] = attached_grain_id
 
-    Probe1 = disk(10)
-    Probe2 = disk(5)
-    GrainSet = np.zeros_like(Map, dtype=int)
-
-    LastIndex = 0
-
-    unique_vals = np.unique(Map)
-
-    # Cycle through phases
-    for ii in unique_vals:
-        # Label individual grains in ii-th phase
-        Labels = label(Map == ii)
-
-        cmap = plt.cm.jet
-        cmap.set_bad(color='black')
-
-        # Cycle through the grains
-        for jj in range(1, Labels.max() + 1):
-            # Get the jj-th grain
-            Grain = Labels == jj
-
-            # Shrink the grain to erase bottlenecks
-            Grain2 = opening(Grain, Probe1)
-
-            # Label residual subgrains
-            SubGrains = label(Grain2)
-            TheGrains = np.zeros_like(Map, dtype=int)
-
-            if SubGrains.max() == 1:
-                TheGrains = label(Grain)
-                ax1.imshow(TheGrains, cmap=cmap)
-                plt.draw()
-            else:
-                # Cycle through detected subgrains
-                for kk in range(1, SubGrains.max() + 1):
-                    SubGrain = SubGrains == kk
-                    SubGrain = dilation(SubGrain, Probe2)
-                    ax1.imshow(SubGrain & Grain, cmap=cmap)
-                    TheGrains[SubGrain & Grain] = kk
-                    plt.draw()
-
-                Leftovers = label(TheGrains == 0)
-
-                # Cycle through missing areas
-                for kk in range(1, Leftovers.max() + 1):
-                    Chunk = Leftovers == kk
-                    Outline = np.logical_and(Chunk, ~dilation(Chunk, disk(2)))
-                    Hits = TheGrains * Outline
-                    Indices = np.unique(Hits)
-                    Indices = Indices[Indices > 0]
-
-                    hist = np.bincount(Hits.ravel())
-                    sorted_inds = np.argsort(hist[Indices])[::-1]
-
-                    if sorted_inds.size > 0:
-                        TheGrains[Chunk] = Indices[sorted_inds[0]]
-                    else:
-                        TheGrains[Chunk] = 1
-
-            TheGrains[TheGrains <= 0] = np.nan
-            TheGrains += LastIndex
-            TheGrains[np.isnan(TheGrains)] = 0
-            GrainSet += TheGrains
-            LastIndex = np.nanmax(GrainSet)
-            ax2.imshow(GrainSet, cmap=cmap)
-            plt.draw()
-
-    T1 = datetime.now()
-    print(f'Elapsed Time: {T1 - T0}')
-    plt.show()
-    return GrainSet
-
-
-# Example usage placeholder for Map and Layers
-# You need to replace the following with your actual data
-Map = np.random.randint(0, 5, (100, 100))  # Randomly generated sample data
-Layers = [{'Map': np.random.randint(0, 2, (100, 100))} for _ in range(5)]
-
-# Execute
-GrainSet = grainID2(Map, Layers)
+    stop_time = datetime.now()
+    logger.info(f'Computation of the grain set done. Elapsed Time: {stop_time - start_time}')
+    return the_grains

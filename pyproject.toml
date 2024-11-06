@@ -8,6 +8,10 @@ license = "MIT"
 [tool.poetry.dependencies]
 python = "^3.8"
 tqdm = "^4.62.3"
+numpy = "*"
+scikit-image = "*"
+pandas = "*"
+imageio = "*"
 
 [tool.poetry.dev-dependencies]
 
