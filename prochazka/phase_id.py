@@ -58,7 +58,7 @@ def phaseID(Layers, *args):
 
     T0 = datetime.now()
     Nv = max(1, len(args))
-    Verbose = [{'Layers': None, 'mask': None, 'Command': ''} for _ in range(Nv)]
+    Verbose = [{'layers': None, 'mask': None, 'Command': ''} for _ in range(Nv)]
     Used = [False] * Nv
     FillCracks = True
 
@@ -72,12 +72,12 @@ def phaseID(Layers, *args):
             Layers = cleanSpikes(Layers, args[ii + 1])
             TheMap = layers2allMaps(Layers)
             Used[ii] = True
-            Verbose[ii].update({'Layers': Layers, 'mask': TheMap, 'Command': args[ii:ii + 2]})
+            Verbose[ii].update({'layers': Layers, 'mask': TheMap, 'Command': args[ii:ii + 2]})
             ii += 2
         elif args[ii].lower() in ['-extrapolateni', '-ni', '-extrapolate']:
             Layers, TheMap = extrapolateNI(Layers, TheMap)
             Used[ii] = True
-            Verbose[ii].update({'Layers': Layers, 'mask': TheMap, 'Command': args[ii]})
+            Verbose[ii].update({'layers': Layers, 'mask': TheMap, 'Command': args[ii]})
             ii += 1
         else:
             ii += 1
@@ -88,14 +88,14 @@ def phaseID(Layers, *args):
         Layers = allMaps2Layers(Layers, TheMap)
     else:
         TheMap[Cracks > 0] = 0
-        Verbose.append({'Layers': Layers, 'mask': TheMap, 'Command': ['-cracks', Cracks]})
+        Verbose.append({'layers': Layers, 'mask': TheMap, 'Command': ['-cracks', Cracks]})
 
     T1 = datetime.now()
     print(f'phaseID: {T1 - T0}')
     return Layers, TheMap, Verbose
 
 
-# Example usage placeholder for Layers
+# Example usage placeholder for layers
 Layers = [{'Label': 'Layer1', 'mask': np.random.randint(0, 2, (100, 100))} for _ in range(3)]
 Layers.append({'Label': 'Not assigned', 'mask': np.zeros((100, 100))})
 

@@ -226,10 +226,9 @@ def _neighbors_conv(image):
     :param image: A two-or-three dimensional image
     :return: neighbor pixels for each pixel of an image
     """
-    image = image.astype(np.int)
-    k = np.array([[1,1,1],[1,0,1],[1,1,1]])
-    neighborhood_count = ndi.convolve(image,k, mode='constant', cval=1)
-    neighborhood_count[~image.astype(np.bool)] = 0
+    k = np.array([[1,1,1], [1,0,1], [1,1,1]])
+    neighborhood_count = ndi.convolve(image.astype(int), k, mode='constant', cval=0)
+    neighborhood_count[np.logical_not(image)] = 0
     return neighborhood_count
 
 

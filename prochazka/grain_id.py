@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from skimage.morphology import disk, opening, dilation, label
 from tqdm.auto import tqdm
 from datetime import datetime
@@ -11,7 +10,13 @@ SUBGRAIN_STRUCT_ELEMENT = disk(5)
 logger = logging.getLogger(__name__)
 
 
-def grainID2(phase_map):
+def refine_grains(phase_map):
+    """
+    Method goes thru the grain map an apply morphology to founded grains.
+    Morphology includes opening for reduction of "threads" and attachment of leftovers to most frequent grain nearby.
+    @param phase_map contains raw data from the microscope where each pixel is attached to some phase
+    @returns refined phase_map after applying morphology. Phase ids could not match.
+    """
     start_time = datetime.now()
 
     # Label individual grains in phase_id-th phase
@@ -36,7 +41,7 @@ def grainID2(phase_map):
     the_grains[leftovers != 0] = 0
     # for leftovers overlapping with its outline some grains attach those leftovers to grains
     attachable_leftovers = np.unique((leftovers_outline_grain_overlap != 0) * leftovers_dilated)[1:]
-    for leftover_id in tqdm(attachable_leftovers, total=attachable_leftovers.size):
+    for leftover_id in tqdm(attachable_leftovers, total=attachable_leftovers.size, desc="Grain refine (leftover)"):
         leftover_mask = leftovers_dilated == leftover_id
         grain_ids, counts = np.unique(leftover_mask * leftovers_outline_grain_overlap, return_counts=True)
         assert grain_ids.size != 1, f"{grain_ids} attached to this leftover outline do not match outline intersection with grains"

@@ -1,45 +1,75 @@
 import numpy as np
-import imageio.v3 as iio
-from skimage.color import rgb2lab, rgb2gray
+from skimage.color import rgb2lab
 from skimage.filters import gaussian
 from skimage.measure import label
 from skimage.exposure import rescale_intensity
 import argparse
 import logging
 import re
+import log_image
 
 logger = logging.getLogger(__name__)
 
 LIGHTNESS_LIMITS = "1,99"
+PHASES_CONFIG = {
+    "colors": np.array([
+        [ 21,  21, 116],
+        [139, 192, 115],
+        [127, 163,  62],
+        [ 35, 115,  79],
+        [230, 185,  65],
+        [230, 101,  51],
+        [  0,   0,   0]]).astype(np.uint8),
+    "labels": [
+        "Quartz",
+        "K-Feldspar",
+        "Chlorite",
+        "Albite",
+        "Mica",
+        "Accessories",
+        "Matrix"
+    ],
+    "detect": [
+        1, 1, 1, 1, 1, 1, 0
+    ]
+}
 
-def phase_threshold(image, phases, args):
-    def imgaussfilt(img, sigma):
-        return gaussian(img, sigma=sigma, channel_axis=2)
-
-    # Emulate MATLAB's `imadjust` using `skimage`'s `rescale_intensity`
-    def imadjust(img, limits=None):
-        """
-        Adjust the image intensity (grayscale).
-        For uint8 images the output intensity levels are in range <0, 255>.
-        For float images the output intensity levels are in range <0, 1>.
-        When limits are specified, the intensity levels are rescaled to the given limits.
-        """
-        if limits is None:
-            return rescale_intensity(img)
-
-        # format "min, max"
-        in_range = tuple([float(value)
-                          for value in re.findall(r"([0-9\.]+)", limits)])
-        return rescale_intensity(img, in_range=in_range)
+def _phases_selected(key):
+    """
+    From PHASE CONFIG filter out records, which should not be detected
+    """
+    return [
+        value
+        for value, should_detect in zip(PHASES_CONFIG[key], PHASES_CONFIG["detect"])
+        if should_detect
+    ]
 
 
-    verbose = []
+def imgaussfilt(img, sigma):
+    return gaussian(img, sigma=sigma, channel_axis=2)
 
-    # Extract phases to be detected
-    phases_selected = [phase for phase in phases[0] if phase['Detect'][0][0]]
+
+def imadjust(img, limits=None):
+    """
+    Emulate MATLAB's `imadjust` using `skimage`'s `rescale_intensity`
+    Adjust the image intensity (grayscale).
+    For uint8 images the output intensity levels are in range <0, 255>.
+    For float images the output intensity levels are in range <0, 1>.
+    When limits are specified, the intensity levels are rescaled to the given limits.
+    """
+    if limits is None:
+        return rescale_intensity(img)
+
+    # format "min, max"
+    in_range = tuple([float(value)
+                      for value in re.findall(r"([0-9\.]+)", limits)])
+    return rescale_intensity(img, in_range=in_range)
+
+
+def phase_threshold(phase_map, args, output_dir=None):
     cracks_image = args.cracks
-    verbose.append({"command": "cracks", "img": cracks_image})
-    phases_count = len(phases_selected)
+    log_image.info(cracks_image, output_dir, "cracks_image.png")
+    phases_count = np.sum(PHASES_CONFIG["detect"])
 
     # Set the output lightness limits.
     if isinstance(args.threshold, str):  # there can be one or two values
@@ -47,32 +77,32 @@ def phase_threshold(image, phases, args):
     else:
         lightness_limits = [args.threshold]
 
-    verbose.append({"command": "threshold", "img": image})
+    log_image.info(phase_map, output_dir, "phase_map.png")
     assert 0 < len(lightness_limits) < 3
 
     # Rescale image intensity into specified range
-    img = imadjust(image, args.adjust_intensity)
-    verbose.append({"command": f"adjust_intensity={args.adjust_intensity}", "img": img})
+    img = imadjust(phase_map, args.adjust_intensity)
+    log_image.info(img, output_dir, "phase_map_adjusted.png")
 
     if args.gaussian_blur != 0:
         img = imgaussfilt(img, args.gaussian_blur)
-        verbose.append({"command": f"gaussian_blur={args.gaussian_blur}", "img": img})
+        log_image.info(img, output_dir, "phase_map_gaussian_blur.png")
 
     cracks_image = cracks_image.astype(float)
     img_lab = rgb2lab(img)
-    phases_color_lab = rgb2lab(np.array([phase['Colors'] for phase in phases_selected]))
+    phases_color_lab = rgb2lab(_phases_selected("colors"))
 
-    # TODO: Use CIE DE2000 instead of eucledian distance here
+    # TODO: Use CIE DE2000 instead of euclidean distance here
     img_without_cracks_lab = np.copy(img_lab)
     img_without_cracks_lab[cracks_image.astype(bool), :] = 0
     if args.lab_distance:
-        verbose.append({"command": "lab_distance", "img": img_without_cracks_lab})
+        log_image.info(img_without_cracks_lab, output_dir, "img_without_cracks_lab.png")
         distances = np.array([
             np.linalg.norm(img_without_cracks_lab.reshape(-1, 3) - phase_color_lab, axis=1)
             for phase_color_lab in phases_color_lab
         ]).T.reshape(img_lab.shape[0], img_lab.shape[1], phases_count)
     elif args.ab_distance:
-        verbose.append({"command": "ab_distance", "img": img_without_cracks_lab})
+        log_image.info(img_without_cracks_lab, output_dir, "img_without_cracks_ab.png")
         distances = np.array([
             np.linalg.norm(img_without_cracks_lab[:,:,1:].reshape(-1, 2) - phase_color_lab[1:])
             for phase_color_lab in phases_color_lab
@@ -90,8 +120,8 @@ def phase_threshold(image, phases, args):
         phase_mask = (phase_map_img == i)
         layers.append({
             'mask': phase_mask,
-            'label': phases_selected[i]['Labels'],
-            'rgb': phases_selected[i]['Colors'],
+            'label': _phases_selected("labels")[i],
+            'rgb': _phases_selected('colors')[i],
             'pixel_count': np.sum(phase_mask),
             'pixel_ratio': np.sum(phase_mask) / phase_mask.size,
             'segments_count': np.max(label(phase_mask))
@@ -99,21 +129,14 @@ def phase_threshold(image, phases, args):
     nophase_mask = phase_map_img != 0
     layers.append({
         'mask': nophase_mask,
-        'Label': 'n/a',
+        'label': 'n/a',
         'rgb': np.zeros(3),
         'pixel_count': np.sum(nophase_mask),
         'pixel_ratio': np.sum(nophase_mask) / nophase_mask.size,
         'segments_count': np.max(label(nophase_mask))
     })
-    return phase_map_img, layers, verbose
+    return phase_map_img, layers
 
-
-# # Example usage placeholder for IMG and phases
-# img = np.random.rand(100, 100, 3)  # Randomly generated sample image
-# phases = [{'Detect': True, 'Colors': [255, 0, 0], 'Labels': 'Phase 1'},
-#           {'Detect': True, 'Colors': [0, 255, 0], 'Labels': 'Phase 2'},
-#           {'Detect': False, 'Colors': [0, 0, 255], 'Labels': 'Phase 3'}]
-# Execute
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="""
@@ -158,13 +181,4 @@ if __name__ == '__main__':
         help="Path to crack mask image",
         default=None
     )
-
     args = parser.parse_args()
-
-    if args.cracks is None:
-        # Use empty image when no crack map is linked
-        args.cracks = np.zeros_like(img[:, :, 0])
-    else:
-        args.cracks = rgb2gray(iio.imread(args.cracks))
-
-    map, layers, verbose = phase_threshold(img, phases, args)

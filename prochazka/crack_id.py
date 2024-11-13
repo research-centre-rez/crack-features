@@ -3,9 +3,13 @@ from scipy.sparse import csr_matrix
 from skimage.measure import label
 from scipy.ndimage import binary_dilation
 from scipy.spatial.distance import cdist
+import logging
+from tqdm.auto import tqdm
+
+logger = logging.getLogger(__name__)
 
 
-def crackID(skeleton, crack_mask):
+def build_crack_metadata(skeleton, cracks_mask):
     """
     Creates list of cracks metadata
     @param skeleton - binary image with the skeleton of the cracks
@@ -15,28 +19,26 @@ def crackID(skeleton, crack_mask):
     """
 
     # Enumerate the cracks
-    labeled_img = label(crack_mask)
+    labeled_img = label(cracks_mask, background=0)
 
     # Align Skeleton enumeration with cracks enumeration
     labeled_skeleton = labeled_img * skeleton.astype(float)
 
     # Count individual cracks
-    cracks_count = np.max(labeled_img)
-
-    # Declare the cracks structure
-    cracks = [dict(area_pixel_count=np.nan,
-                   skeleton_pixel_count_jb=np.nan,
-                   skeleton_pixel_count_jp=np.nan,
-                   width_px=np.nan,
-                   segment_labels=csr_matrix(labeled_img.shape),
-                   skeleton=csr_matrix(labeled_img.shape)) for _ in range(cracks_count)]
-
-    for i in range(1, cracks_count + 1):
-        cracks[i - 1]['area_pixel_count'] = np.sum(labeled_img == i)
-        cracks[i - 1]['skeleton_pixel_count_jb'] = np.sum(labeled_skeleton == i)
-        cracks[i - 1]['width_px'] = cracks[i - 1]['area_pixel_count'] / cracks[i - 1]['skeleton_pixel_count_jb']
-        cracks[i - 1]['segment_labels'] = csr_matrix(labeled_img == i)
-        cracks[i - 1]['skeleton'] = csr_matrix(labeled_skeleton == i)
+    cracks = []
+    cracks_ids = np.unique(labeled_img)[1:]
+    for crack_id in tqdm(cracks_ids, total=len(cracks_ids), desc="Crack labeling"):
+        crack_mask = labeled_img == crack_id
+        crack_size_px = np.sum(crack_mask)
+        skeleton_mask = labeled_skeleton == crack_id
+        skeleton_size_px_jb = np.sum(skeleton_mask)
+        cracks.append({
+            'area_pixel_count': crack_size_px,
+            'skeleton_pixel_count_jb': skeleton_size_px_jb,
+            'width_px': crack_size_px / skeleton_size_px_jb if skeleton_size_px_jb != 0 else np.nan,  # ??
+            'segment_labels': csr_matrix(crack_mask),
+            'skeleton': csr_matrix(skeleton_mask)
+        })
 
     return cracks, labeled_img
 

@@ -1,23 +1,30 @@
+from copy import deepcopy
+
 import numpy as np
-from skimage.morphology import disk, skeletonize
+from skimage.morphology import disk, skeletonize, medial_axis
 from skimage.measure import label
 from scipy.ndimage import binary_dilation
 # bw_morph is python code simulating MATLAB bwmorph lib
 from bw_morph import endpoints, branches
+from tqdm.auto import tqdm
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def crack_metadata(crack, dilation_radius=5):
-    segment_labels = crack["segment_labels"]
+    segment_labels = crack["segment_labels"].toarray()
     outline = np.logical_xor(
         binary_dilation(segment_labels, structure=disk(dilation_radius)),
         segment_labels)
 
-    outline_skeleton = skeletonize(np.logical_or(outline, segment_labels))
+    outline_skeleton = medial_axis(np.logical_or(outline, segment_labels))
     skeleton_outline_pixel_count = np.sum(outline_skeleton)
-    end_points = np.column_stack(np.where(endpoints(outline_skeleton)))
+    end_points = np.column_stack(np.where(endpoints(outline_skeleton).T))
     nodes = branches(outline_skeleton)
 
-    nodes_coords = np.column_stack(np.where(nodes))
+    # Transposition is due to image coordinates indexation
+    nodes_coords = np.column_stack(np.where(nodes.T))
 
     return {
         "segment_labels": segment_labels,
@@ -32,17 +39,17 @@ def crack_metadata(crack, dilation_radius=5):
     }
 
 
-def point_metadata(x, y, skeleton_branches, image_shape):
+def point_metadata(x, y, skeleton_branches, image_shape, is_end):
     height, width = image_shape
     return {
-        'xy': [x, y],
+        'coords': [x, y],
         # branches contains array of branch numbers near [-4,+4] the endpoint
-        'Branches': np.unique(skeleton_branches[
+        'branches': np.unique(skeleton_branches[
                               max(0, y - 4):min(height, y + 5),
                               max(0, x - 4):min(width, x + 5)
                               ])[1:],
-        'IsEnd': True,
-        'IsTerminal': False
+        'is_end': is_end,
+        'is_terminal': False
     }
 
 
@@ -54,159 +61,209 @@ def get_skeleton_branches(skeleton, skeleton_nodes):
     dilated_nodes = binary_dilation(skeleton_nodes, structuring_element)
 
     # Subtract the dilated image from bw_skeleton and check where it's greater than 0
-    binary_diff = (skeleton - dilated_nodes) > 0
+    binary_diff = np.logical_and(skeleton, np.logical_not(dilated_nodes))
 
     # Label the regions in the binary_diff image
-    return label(binary_diff)
+    labeled_skeleton_branches = label(binary_diff)
+
+    return labeled_skeleton_branches, np.max(labeled_skeleton_branches)
 
 
-def cracks_evaluation(phase_img, cracks, phases, dilation_radius):
+def cracks_evaluation(grains_map, cracks, grains_metadata, dilation_radius):
     """
     Processing of the prepared segmentation maps
 
-    @param phase_img - segmentation map from the miscroscope according to pixel-material phase
+    @param grains_map - segmentation map from the miscroscope according to pixel-material phase
     @param cracks - list of cracks (@see ... TODO)
     """
+    cracks_out = deepcopy(cracks)
 
-    # Add not-assigned phase (0 in phase_img)
-    phases.append({
-        'Mask': phase_img == 0,
-        'Label': 'n/a',
-        'LABcolor': [0, 0, 0],
-        'GRBcolor': [0, 0, 0],
-        'area_pixel_count': np.sum(phase_img == 0)
-    })
-    layer_ids = phase_img.copy()
-    layer_ids[phase_img == 0] = len(phases)
-
-    for crack in cracks:
+    for crack in tqdm(cracks_out, total=len(cracks_out), desc="Cracks evaluation"):
         metadata = crack_metadata(crack, dilation_radius)
         skeleton_branches, branches_count = get_skeleton_branches(
             metadata['outline_skeleton'],
             metadata['nodes']['mask']
         )
-        points = [point_metadata(x, y, skeleton_branches, phase_img.shape)
-                  for x, y in metadata["end_points"]]
-        points.extend([point_metadata(x, y, skeleton_branches, phase_img.shape)
+        # Remove crack pixels from the grains_map
+        grains_map_wo_crack = np.copy(grains_map)
+        grains_map_wo_crack[metadata["outline_skeleton"]] = 0
+
+        points = [point_metadata(x, y, skeleton_branches, grains_map.shape, is_end=True)
+                  for x, y in metadata["end_points_coords"]]
+        points.extend([point_metadata(x, y, skeleton_branches, grains_map.shape, is_end=False)
                        for x, y in metadata["nodes"]["coords"]])
 
-        skeletons_endpoints_distance = [
-            np.linalg.norm(metadata["end_points"] - endpoint, axis=1)
-            for endpoint in metadata["end_points"]
-        ]
+        skeletons_endpoints_distance = np.array([
+            np.linalg.norm(metadata["end_points_coords"] - endpoint, axis=1)
+            for endpoint in metadata["end_points_coords"]
+        ])
 
-        Hits = np.unravel_index(
+        furthest_endpoints_indices = np.unravel_index(
             skeletons_endpoints_distance.argmax(),
             skeletons_endpoints_distance.shape
         )
-        for hit in Hits:
-            endpoints[hit]['IsTerminal'] = True
+        for endpoint_id in furthest_endpoints_indices:
+            points[endpoint_id]['is_terminal'] = True
 
-        incident_points = np.array([point['Branches'] for point in points]).T
         branch_struct = [{
-            'mask': branches == branch_id,
-            'Nodes': np.where(incident_points == branch_id)[0],
-            'xy': np.column_stack(np.nonzero(branches == branch_id)),
+            'mask': skeleton_branches == branch_id,
+            'Nodes': [point["coords"] for point in points if branch_id in point['branches']],
+            'xy': np.column_stack(np.nonzero(skeleton_branches == branch_id)),
             'OnEdge': [],
             'Through': []
-        } for branch_id in range(branches_count)]
+        } for branch_id in range(1, branches_count + 1)]
 
         for branch_id in range(branches_count):
-            branch_struct[branch_id] = sortPoints(branch_struct[branch_id], points)
-            phases, Is = sniffSides(branch_struct[branch_id], phase_img)
-            phases = phases[(phases.min(axis=1) != 0), :]  # Remove zero-phase entries
-            branch_struct[branch_id]['Through'] = phases[(phases[:, 0] == phases[:, 1])]
-            branch_struct[branch_id]['OnEdge'] = phases[(phases[:, 0] != phases[:, 1])]
+            # Toto je asi zbytečné. Body jsou seřazeny row by row, column by column
+            # branch_struct[branch_id] = sortPoints(branch_struct[branch_id], points)
+            neighbors_phases, neighbors_coords = attach_neigh_phases_to_skeleton_branch(
+                branch_struct[branch_id],
+                grains_map_wo_crack
+            )
+            neighbors_phases = neighbors_phases[(neighbors_phases.min(axis=1) != 0), :]  # Remove zero-phase entries
+            branch_struct[branch_id]['Through'] = neighbors_phases[(neighbors_phases[:, 0] == neighbors_phases[:, 1])]
+            branch_struct[branch_id]['OnEdge'] = neighbors_phases[(neighbors_phases[:, 0] != neighbors_phases[:, 1])]
 
-        Through = np.vstack([bs['Through'] for bs in branch_struct])
-        OnEdge = np.vstack([bs['OnEdge'] for bs in branch_struct])
+        Through = [bs['Through'] for bs in branch_struct if bs['Through'].size != 0]
+        if len(Through) > 0:
+            Through = np.concatenate(Through)
+            Unq = np.unique(Through)
+            crack['through'] = {
+                "grains_id": Unq,
+                "phases_id": [grains_metadata[u]['phase_id'] for u in Unq],
+                "grains_counts": [np.sum(Through == u) for u in Unq]
+            }
+        else:
+            crack['through'] = {
+                "grains_id": [],
+                "phases_id": [],
+                "grains_counts": []
+            }
 
-        Unq = np.unique(Through)
-        Unq = np.column_stack((Unq, [phases[u]['PhaseID'] for u in Unq], [np.sum(Through == u) for u in Unq]))
-        crack['Through'] = Unq
+        OnEdge = [bs['OnEdge'] for bs in branch_struct if bs['OnEdge'].size != 0]
+        if len(OnEdge) > 0:
+            OnEdge = np.concatenate(OnEdge)
+            Unq = np.unique(OnEdge, axis=0)
+            crack['OnEdge'] = {
+                "grains_id_pairs": Unq,
+                "phases_id_pairs": np.array([grains_metadata[u]['phase_id'] for u in Unq.reshape(-1)]).reshape(
+                    Unq.shape),
+                "counts": [np.sum(np.prod(Unq[edge_point_id, :2] == OnEdge, axis=1)) for edge_point_id in
+                           range(Unq.shape[0])]
+            }
+        else:
+            crack['OnEdge'] = {
+                "grains_id_pairs": [],
+                "phases_id_pairs": [],
+                "counts": []
+            }
 
-        OnEdge = OnEdge[np.argsort(OnEdge, axis=1)]
-        Unq = np.unique(OnEdge, axis=0)
-        Unq = np.column_stack((Unq, [phases[Unq[j, 0]]['PhaseID'] for j in range(Unq.shape[0])],
-                               [phases[Unq[j, 1]]['PhaseID'] for j in range(Unq.shape[0])],
-                               [np.sum(np.prod(Unq[j, :2] == OnEdge, axis=1)) for j in range(Unq.shape[0])]))
-        crack['OnEdge'] = Unq
-
-    return cracks, points, branch_struct
-
-
-def sniffSides(branch_struct, mask):
-    branch_points_count = branch_struct['xy'].shape[0]
-    I = np.full((branch_points_count, 4), np.nan)
-    Ph = np.full((branch_points_count, 2), np.nan)
-
-    for branch_point_id in range(branch_points_count):
-        low_bid = max(branch_point_id - 1, 1)
-        high_bid = min(branch_point_id + 1, branch_points_count)
-        high_bid_coords = branch_struct['xy'][high_bid - 1, ::-1]
-        low_bid_coords = branch_struct['xy'][low_bid - 1, ::-1]
-        derivative = low_bid_coords - high_bid_coords
-        branch_norm = np.matmul(derivative, [[0, -1], [1, 0]]) / np.linalg.norm(derivative)
-
-        branch_point_xy = branch_struct['xy'][branch_point_id, ::-1]
-
-        is_phase = False
-        kk = 1
-
-        # find, in the direction of the norm a phase pixel?
-        while not is_phase:
-            J1 = np.minimum(
-                np.maximum(branch_point_xy - kk * branch_norm, [1, 1]),
-                            [mask.shape[0], mask.shape[1]])
-            J1 = np.round(J1).astype(int) - 1
-            if np.all(branch_point_xy - kk * branch_norm == J1):
-                is_phase = mask[J1[0], J1[1]] != 0
-            else:
-                is_phase = True
-            kk += 1
-
-        is_phase = False
-        kk = 1
-
-        while not is_phase:
-            J2 = np.minimum(np.maximum(branch_point_xy + kk * branch_norm, [1, 1]), [mask.shape[0], mask.shape[1]])
-            J2 = np.round(J2).astype(int) - 1
-            if np.all(branch_point_xy + kk * branch_norm == J2):
-                is_phase = mask[J2[0], J2[1]] != 0
-            else:
-                is_phase = True
-            kk += 1
-
-        I[branch_point_id, :] = [J1[0], J1[1], J2[0], J2[1]]
-        Ph[branch_point_id, :] = [mask[J1[0], J1[1]], mask[J2[0], J2[1]]]
-
-    return Ph, I
+    return cracks_out, points, branch_struct
 
 
-def sortPoints(BranchStruct, NodStruct):
-    BranchStruct['xy'] = np.array(sorted(BranchStruct['xy'], key=lambda p: -NodStruct[p[0] > p[1]]))
-    return BranchStruct
+def _find_path_start(binary_mask):
+    """
+    Find a pixel with only one neighbor to use as a start pixel.
+    """
+    path_pixels = np.argwhere(binary_mask == 1)
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (1, 1), (-1, 1), (1, -1), (-1, -1)]
+
+    for pixel in path_pixels:
+        neighbors = 0
+        for d in directions:
+            neighbor = (pixel[0] + d[0], pixel[1] + d[1])
+            if (0 <= neighbor[0] < binary_mask.shape[0] and
+                    0 <= neighbor[1] < binary_mask.shape[1] and
+                    binary_mask[neighbor] == 1):
+                neighbors += 1
+        if neighbors == 1:  # Pixel with only one neighbor is an endpoint
+            return pixel
+    return path_pixels[0]  # Fallback if no endpoint is found (i.e. branch is a cycle)
 
 
-# Example usage, placeholder for constructing cracks and phases
-class Crack:
-    def __init__(self, meat):
-        self.Meat = meat
-        self.SkelPxJP = None
-        self.OnEdge = None
-        self.Through = None
+def sort_branch_pixels(binary_mask):
+    # Get coordinates of path pixels
+    path_pixels = np.argwhere(binary_mask == 1)
+
+    # Starting pixel
+    start_pixel = _find_path_start(binary_mask)
+
+    # Directions for moving to neighboring pixels (up, down, left, right)
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (1, 1), (-1, 1), (1, -1), (-1, -1)]
+
+    # Initialize the list to store ordered pixels and set of visited pixels
+    ordered_pixels = []
+    visited = set()
+
+    # Depth-First Search (DFS) to follow the path
+    def dfs(pixel):
+        stack = [pixel]
+        while stack:
+            px = stack.pop()
+            if tuple(px) in visited:
+                continue
+            visited.add(tuple(px))
+            ordered_pixels.append(px)
+
+            # Look in each direction for connected path pixels
+            for d in directions:
+                neighbor = (px[0] + d[0], px[1] + d[1])
+
+                # Check if the neighbor is within bounds, unvisited, and part of the path
+                if (0 <= neighbor[0] < binary_mask.shape[0] and
+                        0 <= neighbor[1] < binary_mask.shape[1] and
+                        binary_mask[neighbor] == 1 and
+                        tuple(neighbor) not in visited):
+                    stack.append(neighbor)
+        return ordered_pixels
+
+    # Run DFS starting from the initial pixel
+    dfs(start_pixel)
+
+    # Convert ordered pixels to a list of tuples
+    return [tuple(px) for px in ordered_pixels]
 
 
-class Phase:
-    def __init__(self, phaseID, label):
-        self.PhaseID = phaseID
-        self.Label = label
+def attach_neigh_phases_to_skeleton_branch(branch_struct, mask):
+    """
+    For each point of a branch goes in the direction perpendicular to the skeleton in-point derivative and looks for
+    phase in the phase map
 
-if __name__ == '__main__':
-    # You need to replace the following with your actual cracks and phases
-    Cracks = [Crack(np.random.random((10, 10)) > 0.5) for _ in range(10)]
-    Phases = [Phase(i, f"Phase {i}") for i in range(5)]
-    PhaseIMG = np.random.randint(0, len(Phases), (100, 100))
+    @param branch_struct contains points belonging to the branch
+    @param mask - phase image has for each pixel a phase ID attached
+    @return list of phase-pairs for each branch point
+            list of point-pairs i.e. neighbors belonging to branch point
+    """
+    branch_ordered_pixels = sort_branch_pixels(branch_struct['mask'])
+    gradient = np.gradient(branch_ordered_pixels, axis=0)
+    gradient = np.stack([gradient[:, 0] / np.linalg.norm(gradient, axis=1),
+                         gradient[:, 1] / np.linalg.norm(gradient, axis=1)]).T
+    norm = np.matmul(gradient, [[0, -1], [1, 0]])
+    # Phases found contains 1 when left/right phase pixel have been found
+    phases_found = np.zeros((len(branch_ordered_pixels), 2))
+    neighbors = np.zeros((len(branch_ordered_pixels), 2, 2))  # 2nd dimension is [left, right], 3rd dim [x, y]
 
-    # Execute
-    Cracks, NodStruct, BranchStruct = cracks_evaluation(PhaseIMG, Cracks, Phases, dilation_radius=2, InRadius=2)
+    left_neighbor = np.copy(branch_ordered_pixels)
+    right_neighbor = np.copy(branch_ordered_pixels)
+
+    while not np.all(phases_found != 0):
+        neighbors_done = phases_found != 0
+        left_neighbor = np.round(left_neighbor + norm).astype(int)
+        right_neighbor = np.round(right_neighbor - norm).astype(int)
+
+        for nid, neighbor in enumerate([left_neighbor, right_neighbor]):
+        # Do not solve points out of image
+            out_of_range = np.logical_or(
+                np.logical_or(
+                    neighbor[:, 0] < 0,
+                    neighbor[:, 0] >= mask.shape[0]
+                ), np.logical_or(
+                    neighbor[:, 1] < 0,
+                    neighbor[:, 1] >= mask.shape[1]))
+
+            phases_found[np.logical_and(out_of_range, ~neighbors_done[:, nid]), nid] = -1  # No valid phase found
+            to_be_set = np.logical_and(~out_of_range, ~neighbors_done[:, nid])
+            phases_found[to_be_set, nid] = mask[neighbor[to_be_set, 0], neighbor[to_be_set, 1]]
+            neighbors[to_be_set, nid, :] = neighbor[to_be_set, :]
+
+    return phases_found, neighbors
