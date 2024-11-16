@@ -1,10 +1,10 @@
-import imageio
+import imageio.v3 as iio
 import numpy as np
 import os
 import pickle
 from skimage.measure import label
-from skimage.segmentation import flood, flood_fill, mark_boundaries
-from skimage.morphology import medial_axis, skeletonize
+from skimage.segmentation import flood_fill, mark_boundaries
+from skimage.morphology import medial_axis
 from tqdm.auto import tqdm
 import pandas as pd
 import cv2
@@ -67,7 +67,7 @@ def crop_image(img, crops):
     returns: cropped image
     """
     if isinstance(img, str):
-        return imageio.imread(img)[crops[0][0]:crops[0][1], crops[1][0]: crops[1][1], crops[2][0]:crops[2][1]]
+        return iio.imread(img)[crops[0][0]:crops[0][1], crops[1][0]: crops[1][1], crops[2][0]:crops[2][1]]
     else:
         return img[crops[0][0]:crops[0][1], crops[1][0]: crops[1][1], crops[2][0]:crops[2][1]]
 
@@ -88,7 +88,7 @@ def process_file(file, rootdir=ROOT_DIR, outdir=OUT_DIR, levels=LEVELS, recomput
     cache = _load_cache(file, rootdir, outdir)
 
     # TODO: load only if necessary
-    tif = imageio.imread(file).astype(int)
+    tif = iio.imread(file).astype(int)
     if len(tif.shape) == 2:
         tif = np.stack([tif,tif,tif], axis=2)
         if np.max(tif) > 255:
@@ -117,7 +117,7 @@ def process_file(file, rootdir=ROOT_DIR, outdir=OUT_DIR, levels=LEVELS, recomput
         colored = cache["cimg"]
 
     if recompute or not os.path.isfile(_segmented(file, rootdir, outdir)):
-        imageio.imwrite(_segmented(file, rootdir, outdir), colored.astype(np.uint8))
+        iio.imwrite(_segmented(file, rootdir, outdir), colored.astype(np.uint8))
 
     # MASK
     if recompute or "mask" not in cache:
@@ -138,7 +138,7 @@ def process_file(file, rootdir=ROOT_DIR, outdir=OUT_DIR, levels=LEVELS, recomput
         segmented = cache["mask"]
     # MASK image
     if recompute or not os.path.isfile(_maskfile(file, rootdir, outdir)):
-        imageio.imwrite(_maskfile(file, rootdir, outdir), (segmented * 255).astype(np.uint8))
+        iio.imwrite(_maskfile(file, rootdir, outdir), (segmented * 255).astype(np.uint8))
 
     # SKELETON
     if recompute or "skeleton" not in cache or "distance" not in cache:
@@ -149,7 +149,7 @@ def process_file(file, rootdir=ROOT_DIR, outdir=OUT_DIR, levels=LEVELS, recomput
         recompute = True
     # SKELETON image
     if recompute or not os.path.isfile(_skeletonfile(file, rootdir, outdir)):
-        imageio.imwrite(_skeletonfile(file, rootdir, outdir), (cache["skeleton"] * 255).astype(np.uint8))
+        iio.imwrite(_skeletonfile(file, rootdir, outdir), (cache["skeleton"] * 255).astype(np.uint8))
 
     # LABELS
     if recompute or "labels" not in cache:
@@ -208,4 +208,3 @@ def process_file(file, rootdir=ROOT_DIR, outdir=OUT_DIR, levels=LEVELS, recomput
         pd.DataFrame(cache["bounds"]).to_csv(open(_csvfile(file, rootdir, outdir), "wt"))
 
     return cache
-

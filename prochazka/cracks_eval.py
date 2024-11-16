@@ -4,6 +4,7 @@ import numpy as np
 from skimage.morphology import disk, skeletonize, medial_axis
 from skimage.measure import label
 from scipy.ndimage import binary_dilation
+
 # bw_morph is python code simulating MATLAB bwmorph lib
 from bw_morph import endpoints, branches
 from tqdm.auto import tqdm
@@ -114,7 +115,6 @@ def cracks_evaluation(grains_map, cracks, grains_metadata, dilation_radius):
         } for branch_id in range(1, branches_count + 1)]
 
         for branch_id in range(branches_count):
-            # Toto je asi zbytečné. Body jsou seřazeny row by row, column by column
             # branch_struct[branch_id] = sortPoints(branch_struct[branch_id], points)
             neighbors_phases, neighbors_coords = attach_neigh_phases_to_skeleton_branch(
                 branch_struct[branch_id],
@@ -182,15 +182,16 @@ def _find_path_start(binary_mask):
 
 
 def sort_branch_pixels(binary_mask):
+    """
+    Goes thru point set in the binary mask and order non-zero pixel into a path.
+    """
+
     # Get coordinates of path pixels
     path_pixels = np.argwhere(binary_mask == 1)
-
     # Starting pixel
     start_pixel = _find_path_start(binary_mask)
-
     # Directions for moving to neighboring pixels (up, down, left, right)
     directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (1, 1), (-1, 1), (1, -1), (-1, -1)]
-
     # Initialize the list to store ordered pixels and set of visited pixels
     ordered_pixels = []
     visited = set()
@@ -219,9 +220,32 @@ def sort_branch_pixels(binary_mask):
 
     # Run DFS starting from the initial pixel
     dfs(start_pixel)
-
     # Convert ordered pixels to a list of tuples
     return [tuple(px) for px in ordered_pixels]
+
+
+def pixels_gradient(branch_ordered_pixels, mask):
+    """
+    Computes pixel gradient according to available inputs. See the code.
+    """
+    if len(branch_ordered_pixels) < 2:  # in this case it is not possible to compute gradient
+        crack_nearby = mask[
+            np.max([0, branch_ordered_pixels[0][0] - 1]):np.min([branch_ordered_pixels[0][0] + 2, mask.shape[0]]),
+            np.max([0, branch_ordered_pixels[0][1] - 1]):np.min([branch_ordered_pixels[0][1] + 2, mask.shape[1]]),
+        ]
+        nearby_crack_pixels_count = np.where(crack_nearby == 0)[0].size
+        if nearby_crack_pixels_count == 1:  # there is no other pixel belonging to a crack
+            logger.error("Invalid crack branch (single pixel). No gradient.")
+            return None
+        elif nearby_crack_pixels_count == 2:  # there is 1 other pixel belonging to a crack
+            gradient = np.gradient(np.stack(np.where(crack_nearby == 0), axis=1), axis=0)[:1]
+        elif nearby_crack_pixels_count == 3:  # ideal case, there is pixel before and after and gradient can be computed
+            gradient = np.gradient(np.stack(np.where(crack_nearby == 0), axis=1), axis=0)[1:2]
+        else:  # there is more than two pixels, it is not clear what to use for gradient computation
+            return None
+    else:
+        gradient = np.gradient(branch_ordered_pixels, axis=0)
+    return gradient
 
 
 def attach_neigh_phases_to_skeleton_branch(branch_struct, mask):
@@ -235,7 +259,10 @@ def attach_neigh_phases_to_skeleton_branch(branch_struct, mask):
             list of point-pairs i.e. neighbors belonging to branch point
     """
     branch_ordered_pixels = sort_branch_pixels(branch_struct['mask'])
-    gradient = np.gradient(branch_ordered_pixels, axis=0)
+    gradient = pixels_gradient(branch_ordered_pixels, mask)
+    if gradient is None:
+        return np.array([]), np.array([])
+    # Normalize gradient
     gradient = np.stack([gradient[:, 0] / np.linalg.norm(gradient, axis=1),
                          gradient[:, 1] / np.linalg.norm(gradient, axis=1)]).T
     norm = np.matmul(gradient, [[0, -1], [1, 0]])
@@ -252,7 +279,7 @@ def attach_neigh_phases_to_skeleton_branch(branch_struct, mask):
         right_neighbor = np.round(right_neighbor - norm).astype(int)
 
         for nid, neighbor in enumerate([left_neighbor, right_neighbor]):
-        # Do not solve points out of image
+            # Do not solve points out of image
             out_of_range = np.logical_or(
                 np.logical_or(
                     neighbor[:, 0] < 0,
@@ -266,4 +293,4 @@ def attach_neigh_phases_to_skeleton_branch(branch_struct, mask):
             phases_found[to_be_set, nid] = mask[neighbor[to_be_set, 0], neighbor[to_be_set, 1]]
             neighbors[to_be_set, nid, :] = neighbor[to_be_set, :]
 
-    return phases_found, neighbors
+    return phases_found.astype(int), neighbors.astype(int)

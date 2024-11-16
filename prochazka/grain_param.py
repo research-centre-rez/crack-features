@@ -1,6 +1,5 @@
 import numpy as np
 from scipy.ndimage import binary_erosion
-from datetime import datetime
 from tqdm.auto import tqdm
 
 
@@ -35,7 +34,6 @@ def build_grains_metadata(grain_map, phase_map, layers):
     @param layers: list of phase layers
     @return dict with grain metadata and list with layers metadata
     """
-    start_time = datetime.now()
     unique_phases = np.unique(phase_map)
 
     # Initialize grains_metadata dictionary
@@ -58,8 +56,4 @@ def build_grains_metadata(grain_map, phase_map, layers):
         for grain_id in grains_in_phase_ids:
             grains_metadata[grain_id] = build_grain_metadata(grain_id, grain_map, phase_id, label)
 
-    end_time = datetime.now()
-    print(f'Grain parameters set in: {end_time - start_time}')
-
     return grains_metadata, layers
-
