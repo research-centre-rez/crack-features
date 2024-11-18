@@ -2,7 +2,8 @@ import argparse
 import imageio.v3 as iio
 import os
 
-import output_generator
+import utils.output_dir_generator as output_generator
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="""

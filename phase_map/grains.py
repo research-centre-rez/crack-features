@@ -4,8 +4,8 @@ import numpy as np
 import skimage.measure
 import os
 from tqdm.auto import tqdm
+import utils.image_logger as image_logger
 
-import image_logger
 
 GRAIN_STRUCT_ELEMENT = disk(10)
 SUBGRAIN_STRUCT_ELEMENT = disk(5)
@@ -91,4 +91,4 @@ def grain_size_filter(grain_map, grain_size_px_limit=9000, output_dir_path=None)
     if output_dir_path is not None:
         image_logger.dump_image(os.path.join(output_dir_path, "grain_map_filtered.tiff"), grain_map_size_limit.astype(np.uint16))
 
-    return grain_map_size_limit, grain_size_px_limit
+    return grain_map_size_limit, grain_size_px_limit, non_matrix_grains_count

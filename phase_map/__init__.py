@@ -1,10 +1,10 @@
 import argparse
-import logging
 import os
 import imageio.v3 as iio
-import cleanup
+import phase_map.cleanup
 import grains
-import output_generator
+from utils import output_dir_generator, image_logger, configure_logger
+import numpy as np
 
 
 if __name__ == '__main__':
@@ -28,12 +28,7 @@ if __name__ == '__main__':
         "crack_mask_path",
         type=str,
         help="Path to crack mask.")
-    parser.add_argument(
-        "-o",
-        "--output_dir_path",
-        type=str,
-        help="Path to output directory. If directory does not exist, it will be created (but parent directory must exist).",
-    )
+    output_dir_generator.add_argparse_argument(parser)
     parser.add_argument(
         "-c",
         "--config",
@@ -68,14 +63,8 @@ if __name__ == '__main__':
         default=[1, 99])
     args = parser.parse_args()
 
-    output_generator.prepare_output_path(args.output_dir_path)
-
-    logging.basicConfig(
-        level=logging.INFO,
-        filename=os.path.join(args.output_dir_path, "phase_map.log"),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-    )
+    output_dir_generator.prepare_output_path(args.output_dir_path)
+    configure_logger(os.path.join(args.output_dir_path, "phase_map.log"))
 
     cleanup.load_phases_config(args.config)
     phase_img = iio.imread(args.phase_img_path)
@@ -92,4 +81,8 @@ if __name__ == '__main__':
     # segment single grains
     grains_map = grains.segment_grains(phase_map, output_dir_path=args.output_dir_path)
     # filter out small grains
-    grains_map = grains.grain_size_filter(grains_map, output_dir_path=args.output_dir_path)
+    grains_map, _, matrix_ids_start = grains.grain_size_filter(grains_map, output_dir_path=args.output_dir_path)
+    # create phase map where small grains are attached to a matrix phase
+    phase_map_filtered = np.copy(phase_map)
+    phase_map_filtered[grains_map >= matrix_ids_start] = np.where(np.array(cleanup.PHASES_CONFIG["labels"]) == "Matrix")[0][0]
+    image_logger.dump_image(os.path.join(args.output_dir_path, "phase_map_filtered.png"), phase_map_filtered.astype(np.uint8))

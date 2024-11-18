@@ -3,6 +3,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def add_argparse_argument(parser):
+    parser.add_argument(
+        "-o",
+        "--output-dir-path",
+        type=str,
+        help="Path to output directory. If directory does not exist, it will be created (but parent directory must exist)."
+    )
+
 
 def prepare_output_path(output_dir_path):
     """

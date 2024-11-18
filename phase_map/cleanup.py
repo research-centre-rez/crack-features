@@ -6,7 +6,7 @@ from skimage.exposure import rescale_intensity
 import os
 import logging
 import json
-import image_logger
+import utils.image_logger as image_logger
 from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ def apply_threshold(phase_map, lightness_clip=[1, 99], adjust_intensity=None, ga
     phase_map_img = np.argmin(distances, axis=2)
 
     # clip values out of lightness_limit range
+    # TODO: Prochazka - why there is set to zero? Shouldn't this be "Matrix" value?
     phase_map_img[img_lab[:,:,0] < lightness_clip[0]] = 0
     if len(lightness_clip) > 1:
         phase_map_img[img_lab[:,:,0] > lightness_clip[1]] = 0

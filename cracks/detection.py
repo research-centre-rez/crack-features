@@ -4,12 +4,11 @@ import imageio.v3 as iio
 import numpy as np
 from skimage.color import rgb2gray
 import cv2
-import image_logger
+import utils.image_logger as image_logger
+import utils.output_dir_generator as output_generator
 from tqdm.auto import tqdm
-import logging
 import os
-
-import output_generator
+import utils
 
 
 def _load_input(file_path):
@@ -37,23 +36,34 @@ def threshold_image(gray_img):
     return colored
 
 
-def normalize_hist(img, mid_target):
+def normalize_histogram_left_and_right(img, new_position_of_histogram_max):
     clahe = cv2.createCLAHE(clipLimit=2, tileGridSize=(5, 5))
     img = clahe.apply(img)
     out = np.copy(img)
-    mid = np.argmax(np.histogram(img.reshape(-1), bins=256)[0])
-    out[out <= mid] = img[img <= mid] / mid * mid_target
-    out[out > mid] = (out[out > mid] - mid) / (255 - mid) * (255 - mid_target) + mid_target
+    histogram_max_pos = np.argmax(np.histogram(img.reshape(-1), bins=256)[0])
+    out[out <= histogram_max_pos] = img[img <= histogram_max_pos] / histogram_max_pos * new_position_of_histogram_max
+    out[out > histogram_max_pos] = (out[out > histogram_max_pos] - histogram_max_pos) / (255 - histogram_max_pos) * (255 - new_position_of_histogram_max) + new_position_of_histogram_max
     return out
 
 
-def crack_mask(input_path, output_dir_path):
+def crack_mask_by_thresholds(input_path, output_dir_path):
+    """
+    This method uses CRACKS_CONFIG global setup. If you want to change behavior edit this config file.
+    Thresholds are applied as follows first threshold defined is used as "seeds", second threshold is used as
+    "seed potential" so every pixel belonging to the 2nd threshold is marked as crack iff lay next to seed
+    or transitively lay next to "seed potential" already marked as crack.
+
+    @param input_path: input image which will be thresholded.
+    @param output_dir_path: output dir path where outputs will be stored (debug with prefix [user])
+    @return: crack binary mask
+    """
+
     # Load input image
     gray_img = _load_input(input_path)
     image_logger.info(gray_img, output_dir_path, "[user]input-grayscale.png")
 
     # Normalize histogram
-    gray_norm = normalize_hist(gray_img, CRACKS_CONFIG["median_level"])
+    gray_norm = normalize_histogram_left_and_right(gray_img, CRACKS_CONFIG["median_level"])
     image_logger.info(gray_norm, output_dir_path, "[user]input-normalized.png")
 
     # Apply thresholds
@@ -82,6 +92,8 @@ def crack_mask(input_path, output_dir_path):
     image_logger.info(mask * 255, output_dir_path, "[user]crack-mask.png")
     image_logger.dump_image(os.path.join(output_dir_path, "crack-mask.png"), mask)
 
+    return mask
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="""
@@ -91,12 +103,7 @@ if __name__ == "__main__":
         "input_image_path",
         type=str,
         help="Path to grayscale input image where cracks should be detected.")
-    parser.add_argument(
-        "-o",
-        "--output_dir_path",
-        type=str,
-        help="Path to output directory. If directory does not exist, it will be created (but parent directory must exist).",
-    )
+    output_generator.add_argparse_argument(parser)
     parser.add_argument(
         "-c",
         "--config",
@@ -108,16 +115,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     output_generator.prepare_output_path(args.output_dir_path)
-
-    logging.basicConfig(
-        level=logging.INFO,
-        filename=os.path.join(args.output_dir_path, "cracks_mask.log"),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-    )
+    utils.configure_logger(os.path.join(args.output_dir_path, "cracks_mask.log"))
 
     global CRACKS_CONFIG
     CRACKS_CONFIG = json.load(open(args.config))
     json.dump(CRACKS_CONFIG, open(os.path.join(args.output_dir_path, "cracks_config_used.json"), "wt"))
 
-    crack_mask(input_path=args.input_image_path, output_dir_path=args.output_dir_path)
+    crack_mask_by_thresholds(input_path=args.input_image_path, output_dir_path=args.output_dir_path)
