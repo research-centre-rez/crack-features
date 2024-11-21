@@ -10,26 +10,20 @@ import utils.image_logger as image_logger
 from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
-PHASES_CONFIG = None
 
 
-def load_phases_config(phases_config_path):
-    global PHASES_CONFIG
-    PHASES_CONFIG = json.load(open(phases_config_path))
-
-
-def _phases_selected(key):
+def _phases_selected(key, config):
     """
     From PHASE CONFIG filter out records, which should not be detected
     """
     return [
         value
-        for value, should_detect in zip(PHASES_CONFIG[key], PHASES_CONFIG["detect"])
+        for value, should_detect in zip(config[key], config["detect"])
         if should_detect
     ]
 
 
-def apply_threshold(phase_map, lightness_clip=[1, 99], adjust_intensity=None, gaussian_blur=0, distance_metric=None, output_dir=None):
+def apply_threshold(phase_map, config, lightness_clip=[1, 99], adjust_intensity=None, gaussian_blur=0, distance_metric=None, output_dir=None, output_file_prefix=""):
     """
     For raw phase image do cleanup. Cleanup contains:
     - rescale of the intensity level (in RGB) according to adjust_intensity (@see skimage.exposure.rescale_intensity)
@@ -39,6 +33,7 @@ def apply_threshold(phase_map, lightness_clip=[1, 99], adjust_intensity=None, ga
     PHASE_CONFIG["colors"] is put to the return value.
 
     @param phase_map: RGB image colored according to the segments found
+    @param config: PHASE CONFIG dict
     @param lightness_clip: Clip the intensity range to lightness. Could contain one or two value tuple. If single value
         is present it is used as the lower threshold.
     @param adjust_intensity: None or tuple defines limits for stretching of the histogram
@@ -49,21 +44,21 @@ def apply_threshold(phase_map, lightness_clip=[1, 99], adjust_intensity=None, ga
     @return 2D array with dimensions <height, width> of input image. Value of each "pixel" is set to id of a pahse in
         the PHASE_CONFIG["colors"]
     """
-    json.dump(PHASES_CONFIG, open(os.path.join(output_dir, "phases_config_used.json"), "wt"))
-    image_logger.info(phase_map, output_dir, "phase_map_rgb.png")
+    json.dump(config, open(os.path.join(output_dir, f"{output_file_prefix}phases_config_used.json"), "wt"))
+    image_logger.info(phase_map, output_dir, f"{output_file_prefix}phase_map_rgb.png")
 
     # Rescale image intensity into specified range
     img = rescale_intensity(phase_map, in_range=adjust_intensity)
-    image_logger.info(img, output_dir, "phase_map_adjusted.png")
+    image_logger.info(img, output_dir, f"{output_file_prefix}phase_map_adjusted.png")
 
     if gaussian_blur != 0:
         img = gaussian(img, sigma=gaussian_blur, channel_axis=2)
-        image_logger.info(img, output_dir, "phase_map_gaussian_blur.png")
+        image_logger.info(img, output_dir, f"{output_file_prefix}phase_map_gaussian_blur.png")
 
     img_lab = rgb2lab(img)
-    phases_color_rgb = np.array(_phases_selected("colors")).astype(np.uint8)
+    phases_color_rgb = np.array(_phases_selected("colors", config)).astype(np.uint8)
     phases_color_lab = rgb2lab(phases_color_rgb)
-    image_logger.info(img_lab, output_dir, "phase_img_lab.png")
+    image_logger.info(img_lab, output_dir, f"{output_file_prefix}phase_img_lab.png")
 
     # Attach pixels to phases
     distances = color_distance(img_lab, phases_color_lab, mode=distance_metric)
@@ -76,8 +71,8 @@ def apply_threshold(phase_map, lightness_clip=[1, 99], adjust_intensity=None, ga
         phase_map_img[img_lab[:,:,0] > lightness_clip[1]] = 0
 
     # TODO: Original algorithm removes cracks from this map (phase set to 0)
-    image_logger.info(phases_color_rgb[phase_map_img], output_dir, "[user]phase_map.png")
-    image_logger.dump_image(os.path.join(output_dir, "phase_map.png"), phase_map_img.astype(np.uint8))
+    image_logger.info(phases_color_rgb[phase_map_img], output_dir, f"{output_file_prefix}[user]phase_map.png")
+    image_logger.dump_image(os.path.join(output_dir, f"{output_file_prefix}phase_map.png"), phase_map_img.astype(np.uint8))
 
     return phase_map_img
 

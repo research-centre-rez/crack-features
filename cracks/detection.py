@@ -46,7 +46,7 @@ def normalize_histogram_left_and_right(img, new_position_of_histogram_max):
     return out
 
 
-def crack_mask_by_thresholds(input_path, output_dir_path):
+def crack_mask_by_thresholds(input_path, output_dir_path, output_file_prefix=""):
     """
     This method uses CRACKS_CONFIG global setup. If you want to change behavior edit this config file.
     Thresholds are applied as follows first threshold defined is used as "seeds", second threshold is used as
@@ -60,15 +60,15 @@ def crack_mask_by_thresholds(input_path, output_dir_path):
 
     # Load input image
     gray_img = _load_input(input_path)
-    image_logger.info(gray_img, output_dir_path, "[user]input-grayscale.png")
+    image_logger.info(gray_img, output_dir_path, f"{output_file_prefix}[user]input-grayscale.png")
 
     # Normalize histogram
     gray_norm = normalize_histogram_left_and_right(gray_img, CRACKS_CONFIG["median_level"])
-    image_logger.info(gray_norm, output_dir_path, "[user]input-normalized.png")
+    image_logger.info(gray_norm, output_dir_path, f"{output_file_prefix}[user]input-normalized.png")
 
     # Apply thresholds
     colored = threshold_image(gray_norm)
-    image_logger.info(colored, output_dir_path, "[user]colored.png")
+    image_logger.info(colored, output_dir_path, f"{output_file_prefix}[user]colored.png")
 
     # Create crack mask
     th0 = CRACKS_CONFIG["threshold_levels"][0]["range"]
@@ -89,8 +89,8 @@ def crack_mask_by_thresholds(input_path, output_dir_path):
                 candidates[y, x] += 1
 
     mask = (candidates > 1).astype(np.uint8)
-    image_logger.info(mask * 255, output_dir_path, "[user]crack-mask.png")
-    image_logger.dump_image(os.path.join(output_dir_path, "crack-mask.png"), mask)
+    image_logger.info(mask * 255, output_dir_path, f"{output_file_prefix}[user]crack-mask.png")
+    image_logger.dump_image(os.path.join(output_dir_path, f"{output_file_prefix}crack-mask.png"), mask)
 
     return mask
 
@@ -103,22 +103,17 @@ if __name__ == "__main__":
         "input_image_path",
         type=str,
         help="Path to grayscale input image where cracks should be detected.")
-    output_generator.add_argparse_argument(parser)
-    parser.add_argument(
-        "-c",
-        "--config",
-        type=str,
-        help=f"Path to the cracks_config.json. In this file are defined crack image processing parameters."
-             f"(@see config/cracks_config.json).",
-        default="../config/cracks_config.json"
-    )
+    utils.output_dir_generator.add_argparse_argument(parser)
+    utils.config_loader.add_argparse_argument_cracks_config_path(parser)
+    utils.cli_arguments.add_sample_name(parser)
     args = parser.parse_args()
 
-    output_generator.prepare_output_path(args.output_dir_path)
-    utils.configure_logger(os.path.join(args.output_dir_path, "cracks_mask.log"))
+    output_dir_path, output_file_prefix = output_generator.prepare_output_path(args.output_dir_path, args.sample_name)
+    utils.configure_logger(os.path.join(output_dir_path, f"{output_file_prefix}cracks_mask.log"))
 
     global CRACKS_CONFIG
-    CRACKS_CONFIG = json.load(open(args.config))
-    json.dump(CRACKS_CONFIG, open(os.path.join(args.output_dir_path, "cracks_config_used.json"), "wt"))
+    utils.config_loader.Config.load_config(args.cracks_config_path, "cracks")
+    CRACKS_CONFIG = utils.config_loader.Config.get_config("cracks")
+    json.dump(CRACKS_CONFIG, open(os.path.join(output_dir_path, f"{output_file_prefix}cracks_config_used.json"), "wt"))
 
-    crack_mask_by_thresholds(input_path=args.input_image_path, output_dir_path=args.output_dir_path)
+    crack_mask_by_thresholds(input_path=args.input_image_path, output_dir_path=output_dir_path, output_file_prefix=output_file_prefix)

@@ -1,4 +1,6 @@
 import logging
+
+from humanfriendly.terminal import output
 from skimage.morphology import disk, opening, dilation, label
 import numpy as np
 import skimage.measure
@@ -12,7 +14,7 @@ SUBGRAIN_STRUCT_ELEMENT = disk(5)
 logger = logging.getLogger(__name__)
 
 
-def segment_grains(phase_map, output_dir_path=None):
+def segment_grains(phase_map, output_dir_path=None, output_file_prefix=""):
     """
         Method goes thru the grain map an apply morphology to founded grains.
         Morphology includes opening for reduction of "threads" and attachment of leftovers to most frequent grain nearby.
@@ -51,14 +53,14 @@ def segment_grains(phase_map, output_dir_path=None):
         the_grains[leftover_mask] = attached_grain_id
 
     logger.info(f'Computation of the grain set done. Total {np.max(the_grains)} grains.')
-    image_logger.info(the_grains, output_dir_path, "[user]grain_map.tiff")
+    image_logger.info(the_grains, output_dir_path, f"{output_file_prefix}[user]grain_map.tiff")
     if output_dir_path is not None:
-        image_logger.dump_image(os.path.join(output_dir_path, "grain_map.tiff"), the_grains.astype(np.uint16))
+        image_logger.dump_image(os.path.join(output_dir_path, f"{output_file_prefix}grain_map.tiff"), the_grains.astype(np.uint16))
 
     return the_grains
 
 
-def grain_size_filter(grain_map, grain_size_px_limit=9000, output_dir_path=None):
+def grain_size_filter(grain_map, grain_size_px_limit=9000, output_dir_path=None, output_file_prefix=""):
     logger.info(f'Grain filter started.')
 
     grain_idx, grain_sizes_px = np.unique(grain_map.ravel(), return_counts=True)
@@ -72,7 +74,7 @@ def grain_size_filter(grain_map, grain_size_px_limit=9000, output_dir_path=None)
     grain_map_size_limit[np.isin(grain_map, grain_ids_bigger_than_limit)] = 1
     grain_map_size_limit = label(grain_map_size_limit, background=0)
     non_matrix_grains_count = np.max(grain_map_size_limit)
-    image_logger.info((grain_map_size_limit != 0).astype(float), output_dir_path, "[user]non_matrix_grains.png")
+    image_logger.info((grain_map_size_limit != 0).astype(float), output_dir_path, f"{output_file_prefix}[user]non_matrix_grains.png")
 
     # matrix is phase mixed from two (or more) phases and the rest of filtered out grains
     matrix_grains, matrix_grains_count = skimage.measure.label(
@@ -80,15 +82,15 @@ def grain_size_filter(grain_map, grain_size_px_limit=9000, output_dir_path=None)
         background=0,
         return_num=True
     )
-    image_logger.info((matrix_grains != 0).astype(float), output_dir_path, "[user]matrix_grains.png")
+    image_logger.info((matrix_grains != 0).astype(float), output_dir_path, f"{output_file_prefix}[user]matrix_grains.png")
 
     matrix_grains[matrix_grains != 0] += non_matrix_grains_count
     grain_map_size_limit[grain_map_size_limit == 0] = matrix_grains[matrix_grains > 0]
 
     logger.info(f'Grain filter done. Total {np.max(non_matrix_grains_count)} grains and {matrix_grains_count} matrix grains.')
-    image_logger.info(grain_map_size_limit, output_dir_path, "[user]grain_map_filtered.tiff")
+    image_logger.info(grain_map_size_limit, output_dir_path, f"{output_file_prefix}[user]grain_map_filtered.tiff")
     # Dump filtered grains image into output
     if output_dir_path is not None:
-        image_logger.dump_image(os.path.join(output_dir_path, "grain_map_filtered.tiff"), grain_map_size_limit.astype(np.uint16))
+        image_logger.dump_image(os.path.join(output_dir_path, f"{output_file_prefix}grain_map_filtered.tiff"), grain_map_size_limit.astype(np.uint16))
 
     return grain_map_size_limit, grain_size_px_limit, non_matrix_grains_count

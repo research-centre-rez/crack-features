@@ -6,7 +6,7 @@ from skimage.exposure import rescale_intensity
 import argparse
 import logging
 import re
-import log_image
+from utils import image_logger
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +66,9 @@ def imadjust(img, limits=None):
     return rescale_intensity(img, in_range=in_range)
 
 
-def phase_threshold(phase_map, args, output_dir=None):
+def phase_threshold(phase_map, args, output_dir=None, output_file_prefix=""):
     cracks_image = args.cracks
-    log_image.info(cracks_image, output_dir, "cracks_image.png")
+    image_logger.info(cracks_image, output_dir, f"{output_file_prefix}cracks_image.png")
     phases_count = np.sum(PHASES_CONFIG["detect"])
 
     # Set the output lightness limits.
@@ -77,16 +77,16 @@ def phase_threshold(phase_map, args, output_dir=None):
     else:
         lightness_limits = [args.threshold]
 
-    log_image.info(phase_map, output_dir, "phase_map.png")
+    image_logger.info(phase_map, output_dir, f"{output_file_prefix}phase_map.png")
     assert 0 < len(lightness_limits) < 3
 
     # Rescale image intensity into specified range
     img = imadjust(phase_map, args.adjust_intensity)
-    log_image.info(img, output_dir, "phase_map_adjusted.png")
+    image_logger.info(img, output_dir, f"{output_file_prefix}phase_map_adjusted.png")
 
     if args.gaussian_blur != 0:
         img = imgaussfilt(img, args.gaussian_blur)
-        log_image.info(img, output_dir, "phase_map_gaussian_blur.png")
+        image_logger.info(img, output_dir, f"{output_file_prefix}phase_map_gaussian_blur.png")
 
     cracks_image = cracks_image.astype(float)
     img_lab = rgb2lab(img)
@@ -96,13 +96,13 @@ def phase_threshold(phase_map, args, output_dir=None):
     img_without_cracks_lab = np.copy(img_lab)
     img_without_cracks_lab[cracks_image.astype(bool), :] = 0
     if args.lab_distance:
-        log_image.info(img_without_cracks_lab, output_dir, "img_without_cracks_lab.png")
+        image_logger.info(img_without_cracks_lab, output_dir, f"{output_file_prefix}img_without_cracks_lab.png")
         distances = np.array([
             np.linalg.norm(img_without_cracks_lab.reshape(-1, 3) - phase_color_lab, axis=1)
             for phase_color_lab in phases_color_lab
         ]).T.reshape(img_lab.shape[0], img_lab.shape[1], phases_count)
     elif args.ab_distance:
-        log_image.info(img_without_cracks_lab, output_dir, "img_without_cracks_ab.png")
+        image_logger.info(img_without_cracks_lab, output_dir, f"{output_file_prefix}img_without_cracks_ab.png")
         distances = np.array([
             np.linalg.norm(img_without_cracks_lab[:,:,1:].reshape(-1, 2) - phase_color_lab[1:])
             for phase_color_lab in phases_color_lab
