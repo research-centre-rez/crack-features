@@ -1,6 +1,5 @@
 import logging
 
-from humanfriendly.terminal import output
 from skimage.morphology import disk, opening, dilation, label
 import numpy as np
 import skimage.measure
