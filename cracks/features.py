@@ -19,7 +19,7 @@ def attach_neigh_phases_to_skeleton_branch(branch_mask, phase_map):
     branch_ordered_pixels = sort_branch_pixels(branch_mask)
     gradient = path_direction(branch_ordered_pixels, phase_map)
     if gradient is None:
-        return np.array([]), np.array([])
+        return np.array([]), np.array([]), np.array([])
     # Normalize gradient
     gradient = np.stack([gradient[:, 0] / np.linalg.norm(gradient, axis=1),
                          gradient[:, 1] / np.linalg.norm(gradient, axis=1)]).T
@@ -28,14 +28,11 @@ def attach_neigh_phases_to_skeleton_branch(branch_mask, phase_map):
     phases_found = -2 * np.ones((len(branch_ordered_pixels), 2))
     neighbors = - np.ones((len(branch_ordered_pixels), 2, 2))  # 2nd dimension is [left, right], 3rd dim [x, y]
 
-    left_neighbor = np.copy(branch_ordered_pixels)
-    right_neighbor = np.copy(branch_ordered_pixels)
-
-    steps = 0
+    steps = 1
     while not np.all(phases_found != -2):
         neighbors_done = phases_found != -2
-        left_neighbor = np.round(left_neighbor + norm).astype(int)
-        right_neighbor = np.round(right_neighbor - norm).astype(int)
+        left_neighbor = np.round(branch_ordered_pixels + steps * norm).astype(int)
+        right_neighbor = np.round(branch_ordered_pixels - steps * norm).astype(int)
 
         steps += 1
         for nid, neighbor in enumerate([left_neighbor, right_neighbor]):
@@ -55,7 +52,7 @@ def attach_neigh_phases_to_skeleton_branch(branch_mask, phase_map):
             phases_found[to_be_set, nid] = phase_map[neighbor[to_be_set, 0], neighbor[to_be_set, 1]]
             neighbors[to_be_set, nid, :] = neighbor[to_be_set, :]
 
-    return phases_found.astype(int), neighbors.astype(int)
+    return phases_found.astype(int), neighbors.astype(int), gradient
 
 
 def phase_analysis(crack_mask_smooth, phase_map):
@@ -73,6 +70,7 @@ def phase_analysis(crack_mask_smooth, phase_map):
     branches_map = label(branches_mask, background=0)
     branches = np.unique(branches_map)
     neighbors_map = -2 * np.ones(branches_map.shape + (2, 2))
+    gradient_map = np.zeros(branches_map.shape + (2, ))
 
     phase_map[crack_mask_smooth.astype(bool)] = -2  # erase phase information where cracks were detected
     through = -np.ones_like(phase_map, dtype=int)
@@ -80,18 +78,19 @@ def phase_analysis(crack_mask_smooth, phase_map):
     # first id corresponds to background and will be skipped
     for branch_id in tqdm(branches[1:], total=len(branches) - 1, desc="Phase left/right (branches)"):
         branch_mask = branches_map == branch_id
-        phases_per_px, neigh_coords_per_px = attach_neigh_phases_to_skeleton_branch(branch_mask, phase_map)
+        phases_per_px, neigh_coords_per_px, gradient = attach_neigh_phases_to_skeleton_branch(branch_mask, phase_map)
         if phases_per_px.size > 0:
             coords = np.where(branch_mask)
             xx, yy = coords
             neighbors_map[np.where(branch_mask)] = neigh_coords_per_px
+            gradient_map[np.where(branch_mask)] = gradient
             for phases, x, y in zip(phases_per_px, xx, yy):
                 if phases[0] == phases[1]:
                     through[x, y] = phases[0]
                 else:
                     edge[x, y, :] = phases
 
-    return through, edge, neighbors_map.astype(int), branches_map
+    return through, edge, neighbors_map.astype(int), branches_map, gradient_map
 
 
 def compute(crack_mask_smooth):
