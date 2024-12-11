@@ -61,11 +61,12 @@ def edge_stacked_chart(phase_edge_pairs, phase_edge_count, labels, sample_name, 
             continue
         plt.bar(np.array(labels), edge_counts[1:, phase_order], width=0.7, bottom=bars_bottom, label=labels[phase_id])
         bars_bottom += edge_counts[1:, phase_order]
-    plt.title(f"Crack pixels through phase {sample_name}")
-    plt.xlabel("Phase name")
-    plt.ylabel("Pixel count")
-    plt.legend()
-    plt.savefig(os.path.join(output_dir_path, f"{output_file_prefix}phase-edge.png"))
+    plt.title(f"Crack neighbors - phase pairs {sample_name}", fontsize="xx-large")
+    plt.xlabel("Phase name", fontsize="xx-large")
+    plt.ylabel("Pixel count", fontsize="xx-large")
+    plt.legend(fontsize="xx-large")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir_path, f"{output_file_prefix}phase-edge.png"), transparent=True)
     plt.close()
 
     return all_phases_used, edge_counts
