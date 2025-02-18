@@ -2,6 +2,11 @@
 
 Toolbox for feature computation for crack and phase maps. Repository contains image processing algorithms for analysis of electron microscopy images.
 
+The algorithm works according to the schema:
+<img width="663" alt="Screenshot 2025-02-18 at 16 24 29" src="https://github.com/user-attachments/assets/11608f33-58eb-452a-a27b-70e111e9051b" />
+
+There are two pipelines. The first one processes the SEM BSE images on which segment cracks. The second uses the crack mask and EDS images to fulfill grain cracking information.
+
 ## Installation
 Follow standard virtual environment creation by using `venv`, `poetry` or `conda`. This software was developed by using Python version 3.10, but hopefully works for wide range of Python versions.
 
