@@ -17,6 +17,13 @@ jupyter:
 %autoreload 2
 ```
 
+Zadání pro tento notebook je tvorba modelu, který odhadne čas průchodu ultrazvuku pro daný vzorek (dle vlastností cracků, které byly detekovány na snímku).
+
+Shrnutí:
+- množství dostupných dat se ukázalo jako nedostatečné (tři vzorky měly video před i po expozici, pouze jedno video mělo v záběru vzorek po celou dobu)
+- pomocí chatGPT byl navržen model DeepSets, který by měl být vhodný pro malé množství dat a variabilní počet cracků pro každý vzorek (ten je na začátku notebooku, ale vůbec se nepoužil)
+- nakonec jsme se s Marcinem dohodli, že výstupem bude zregistrovaná maska cracků před a po expozici, zbytek doděláme, jakmile bude větší datová sada
+
 ```python
 import math, copy, random
 import matplotlib.pyplot as plt
@@ -33,6 +40,10 @@ import os
 from tqdm.auto import tqdm
 from skimage.morphology import label
 ```
+
+# DeepSets
+
+DeepSets jsou architektura neuronové sítě určená pro vstupy, které tvoří množina prvků s proměnným počtem a pořadí prvků nemá význam. Každý prvek množiny se nejprve zpracuje stejným sdíleným enkodérem (typicky malá MLP), čímž vzniknou jejich reprezentace. Tyto reprezentace se následně sloučí pomocí permutacně invariantní agregace (například průměr, maximum nebo jejich kombinace), takže výsledný vektor nezávisí na pořadí ani počtu prvků. Nad tímto agregovaným vektorem pak pracuje „head“ sítě, který produkuje finální výstup (zde jedno číslo). Díky sdíleným vahám a invariantní agregaci je model kompaktní a dobře použitelný i při velmi malém množství trénovacích dat.
 
 ```python
 def set_seed(seed=42):
@@ -211,7 +222,7 @@ def kfold_cv(dfs, y, feature_cols=None, k=5):
 ```
 
 <!-- #region -->
-# Usage
+## Usage
 
 1) Připrav vstup:
     - dfs: List[pd.DataFrame], každý má 6 sloupců (3 int, 3 float)
@@ -239,6 +250,10 @@ print(preds)
 ```
 
 <!-- #endregion -->
+
+# Příprava datasetu (crack features)
+
+V notebooku 02 byly napočítány vlasnosti cracků v každém ze vzorků a uloženy na disk. Další jejich párování je cílem této sekce
 
 ```python
 dfs = []
@@ -324,6 +339,10 @@ dfs[2][0][0].mean()
 dfs[2][0][1].mean()
 ```
 
+# Registrace 3C-part2 před a po expozici
+
+Pouze jeden vzorek máme nasnímaný před a po expozici a to v podobné kvalitě. Provedeme tedy regitraci pouze na něm a porovnáme masky.
+
 ```python
 colors=["red", "blue", "green", "orange"]
 plt.figure(figsize=(15,8))
@@ -350,10 +369,13 @@ ptsDst = np.array([[456, 163, 695, 1100],[118, 718, 1005, 590]]).astype(np.float
 ```
 
 ```python
+# Globální perspektivní transformace by měla být dostatečná pro tyto dva obrázky
 tform = cv2.getPerspectiveTransform(ptsSrc, ptsDst)
 ```
 
 ```python
+# Transformace bude uložena pro případné budoucí použití (hlavně protože body jsou ručně zadané)
+# TODO: teoreticky by toto měl být modul do erikova SW - budeme chtít registrovat všechny vzorky
 np.savetxt("/Users/gimli/cvr/data/beton/erik-features/3C-part2_processed_registered_stack-perspective-params.txt",tform)
 ```
 
@@ -373,6 +395,8 @@ ax.set_xlim(100, 1200)
 #ax.set_ylim(500, 700)
 plt.show()
 ```
+
+## Aplikace tranformace na data (masky, cracky, ...)
 
 ```python
 from cracks.concrete_cylinders import detection
@@ -441,11 +465,14 @@ for lid in np.unique(labeled):
 ```
 
 ```python
+# Vizualizace změn ve struktuře trhlin
+# červená - detekované trhliny před
+# zelená - detekované trhliny po expozici => žlutá (před i po)
+
 img = np.stack([
     cv2.warpPerspective((cracks_and_holes[0] != 0).astype(np.uint8) * 255, tform, (1920, 1080)),
     mask.astype(np.uint8) * 255,
-    (cracks_and_holes[1] != 0).astype(np.uint8) * 255,
-
+    np.zeros_like(mask).astype(np.uint8),
 ], axis=2)
 ```
 
@@ -458,6 +485,7 @@ plt.show()
 ```
 
 ```python
+# Data pro Marcina do prezentace - stejný vzorek před a po expozici (zregistrované)
 plt.figure(figsize=(15, 10))
 ax = plt.subplot(1,2,1)
 ax.imshow(cv2.warpPerspective(stacks[2][0][0].astype(np.uint8), tform, (1920, 1080)), cmap="gray")
@@ -470,6 +498,7 @@ plt.show()
 ```
 
 ```python
+# maska cracků
 plt.figure(figsize=(15,5))
 ax = plt.subplot(1,2,1)
 ax.imshow(cv2.warpPerspective((cracks_and_holes[0] != 0).astype(np.uint8), tform, (1920, 1080)))
@@ -478,7 +507,10 @@ ax.imshow(cracks_and_holes[1] != 0)
 plt.show()
 ```
 
-DEPTH MAP
+# Hloubková mapa trhlin
+
+Ze stacku je možné napočítat hloubkovou mapu. Níže je kód generovaný GPT pro tvorbu hloubkové mapy.
+Vstupem je matice úhlu nasvětlení každého ze snímků (vygenerováno) a stack snímků.
 
 ```python
 stacks[2][0].shape
@@ -666,9 +698,13 @@ z_rel = z - plane
 ```
 
 ```python
-plt.imshow(z_rel)
+plt.imshow(I[0])
+plt.imshow(z_rel, cmap="Reds", alpha=0.8)
+plt.title("Depth map")
 plt.show()
 ```
+
+## DeepSets dohra
 
 ```python
 y_dummy = np.random.rand(len(dfs)) * 10
