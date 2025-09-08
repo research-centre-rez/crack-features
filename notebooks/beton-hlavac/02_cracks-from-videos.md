@@ -1,0 +1,453 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .md
+      format_name: markdown
+      format_version: '1.3'
+      jupytext_version: 1.17.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```python
+%load_ext autoreload
+%autoreload 2
+```
+
+Erik připravil data to superpozice. Nyní je potřeba:
+
+- vysegmentovat betonový válec
+- identifikovat pixely patřící trhlinám
+- napočítat vlastnosti trhlin na válci
+
+```python
+import os
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from skimage.morphology import label
+from scipy.optimize import minimize
+from matplotlib.patches import Circle
+from tqdm.auto import tqdm
+from skimage.filters.rank import median
+from skimage.morphology import disk, binary_erosion, closing
+```
+
+Data bylo nutné rozdělit na jumbo vzorky a malé vzorky. Vyrobil jsem csv, kde jsou označeny.
+Níže je filtrace podle třídy vzorku (pracuji jen se smallv1)
+
+```python
+ROOT = "/Users/gimli/cvr/data/beton/erik"
+metadata = pd.read_csv(os.path.join(ROOT, "metadata.csv"), header=None, names=["file path", "type"])
+print(f"Types of samples: {np.unique(metadata["type"]).tolist()}")
+```
+
+```python
+# go thru directory and select only samples "smallv1"
+my_type = "smallv1"
+stack_files = metadata[metadata["type"] == my_type]["file path"].values.tolist()
+```
+
+```python
+stack_files
+```
+
+Hypotéza je, že stack obsahuje pouze dvě třídy betonový vzorek (popředí) a pozadí.
+
+Protože na rozhraní budou pixely, které mohou být identifikovány špatně, tak je potřeba provést morfologii finální masky.
+
+Aby morfologie měla co nejméně drastický dopad, tak se velikost kruhového kernelu postupně zvětšuje, dokud nevznikne pouze jeden segment (popředí) ve finální masce.
+
+```python
+def adaptive_closing(stack, threshold=10):
+    # Adaptive closing
+    # - increases size of the circular kernel until only one segment remains
+    morph_size = 1
+    intensity_threshold = threshold
+    raw_mask = np.min(stack, axis=0) < intensity_threshold
+    closed = np.copy(raw_mask)
+    while np.unique(label(1 - closed)).size > 2:
+        morph_size = morph_size + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_size, morph_size))
+        # Perform closure
+        closed = cv2.morphologyEx((np.min(stack, axis=0) >= 10).astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+
+    return closed, morph_size, raw_mask
+```
+
+Hypotéza: vzorek má kruhový tvar.
+
+Aplikace: fitneme kruh na masku popředí. Penalizuji počtem pixelů, které mají být uvnitř masky a nejsou a počtem pixelů, které jsou vně kruhu a nemají být.
+
+```python
+def fit_circle(mask, min_radius=500):
+    def circle_error(params):
+        center_x, center_y, radius = params
+        y, x = np.where(mask == 1)
+        pos = np.sum((x - center_x) ** 2 + (y - center_y) ** 2 > radius ** 2)
+        y, x = np.where(mask == 0)
+        neg = np.sum((x - center_x) ** 2 + (y - center_y) ** 2 <= (radius - 1) ** 2)
+        return pos + neg
+
+    opt = minimize(circle_error,
+                   x0=[mask.shape[1] / 2, mask.shape[0] / 2, min_radius * 1.125],
+                   bounds=((min_radius, mask.shape[1] - min_radius),
+                           (min_radius, mask.shape[0] - min_radius),
+                           (min_radius, min_radius * 1.25)),
+                   method="COBYLA")
+    return opt
+```
+
+**Batch run:** adaptive closing pro oprahované snímky a fitnutí kruhu na morfologicky upravenou masku.
+
+```python
+rows = np.ceil(len(stack_files) / 2).astype(int)
+layers = []
+plt.figure(figsize=(15, rows * 5))
+for i, stack_file in tqdm(enumerate(stack_files), total=len(stack_files), desc="computing masks"):
+    try:
+        stack = np.load(stack_file)
+        mask, kernel_size, raw_mask = adaptive_closing(stack, 3)
+        circle = fit_circle(mask)
+        circle_mask = np.zeros_like(mask)
+
+        for x in np.arange(circle_mask.shape[1]):
+            for y in np.arange(circle_mask.shape[0]):
+                if (x - circle.x[0]) ** 2 + (y - circle.x[1]) ** 2 <= circle.x[2] ** 2:
+                    circle_mask[y, x] = 1
+        layers.append([raw_mask, mask, circle_mask])
+        ax = plt.subplot(rows, 2, i + 1)
+        ax.imshow(stack[100], cmap="gray")
+        ax.imshow(mask, cmap="Reds", alpha=0.5)
+        ax.add_patch(Circle((circle.x[0], circle.x[1]), circle.x[2], alpha=0.5))
+        ax.set_title(f"{os.path.basename(stack_file)}({kernel_size}): [{circle.x[0]:.0f},{circle.x[1]:.0f}] with {circle.x[2]:.0f}px radius (err {circle.fun})", fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    except Exception as e:
+        print(f"{os.path.basename(stack_file)}: processing failed with {e}")
+plt.show()
+```
+
+# Signifikantní rozdíl v intenzitě
+
+Vysegmentujeme pixely, kde rozdíl v intenzitě je zásadní. Tyto pixely tvoří segmenty:
+- Kulaté (a malé) segmenty jsou póry.
+- Čárové segmenty jsou trhliny.
+
+Je nutné zajistit spojitost/nejspojitost segmentů, nebo jinak řešit co je segment...
+
+Níže je naivní řešení bez dělení segmentů.
+
+```python
+max = np.max(stack, axis=0)
+min = np.min(stack, axis=0)
+# Tady je otázka čím by se to mělo rozmazávat ... velikost disku je poměrně zásadní pro finální výsledek
+# Velikost zřejmě souvisí s velikostí objektů, které se mají ve výsledku detekovat, tj. bude nutné ji nastavit podle typu vzorků
+# Nabízí se otázka jak tento parametr určit
+max_med = median(max, footprint=disk(51), mask=layers[-1][2])
+min_med = median(min, footprint=disk(51), mask=layers[-1][2])
+
+minmax_diff_norm = max.astype(float) - max_med.astype(float) - (min.astype(float) - min_med.astype(float))
+```
+
+```python
+plt.figure(figsize=(15, 13))
+
+ax = plt.subplot(2, 1, 1)
+ax.hist(minmax_diff_norm[layers[-1][2].astype(bool)].reshape(-1), bins=200)
+ax.set_yscale("log")
+ax.axvline(-2, color="red")
+ax.set_title("Histogram of differences between max and min values (normalized)")
+
+ax = plt.subplot(2, 1, 2)
+ax.imshow(np.logical_or(
+    minmax_diff_norm * layers[-1][2] > 15,
+    minmax_diff_norm * layers[-1][2] < -15
+), cmap="Reds")
+ax.imshow(minmax_diff_norm * layers[-1][2], cmap="gray", alpha=0.3)
+ax.set_xlim(80,1180)
+ax.set_title("Threshold of differences between max and min values (normalized)")
+plt.show()
+```
+
+```python
+cracks_and_holes = label(np.logical_or(
+    minmax_diff_norm * layers[-1][2] > 15,
+    minmax_diff_norm * layers[-1][2] < -15
+))
+```
+
+Measure circularity of each segment and split them according to a threshold ...
+
+Hypothesis: Circular are pores, non-circular cracks and missing parts of the sample.
+
+There is definitely a lot of errors (fused segments, noise around the threshold) but rough idea should be valid
+
+```python
+CIRCULARITY_THRESHOLD = 1.7
+```
+
+```python
+segments = []
+for l in tqdm(np.arange(1, np.max(cracks_and_holes)), total=np.max(cracks_and_holes) - 1, desc="cracks and holes features"):
+    x, y = np.where(cracks_and_holes == l)
+    segments.append([l, np.max(x), np.min(x), np.max(y), np.min(y), len(x)])
+```
+
+```python
+circularity = [(segment_id, (((maxx - minx + 1) + (maxy - miny + 1)) / 4) ** 2 * np.pi / pixel_count)
+               for segment_id, maxx, minx, maxy, miny, pixel_count in segments]
+```
+
+```python
+border = binary_erosion(layers[-1][2], disk(5))
+broken_edge_segments = set(np.unique(cracks_and_holes * (layers[-1][2] - border)).tolist())
+```
+
+```python
+circular = set([seg_id for seg_id, ratio in circularity if ratio < CIRCULARITY_THRESHOLD]) - broken_edge_segments
+non_circular = set([seg_id for seg_id, ratio in circularity if ratio >= CIRCULARITY_THRESHOLD]) - broken_edge_segments
+```
+
+```python
+plt.imshow(cracks_and_holes * (layers[-1][2] - border), cmap="gray")
+plt.show()
+```
+
+```python
+plt.figure(figsize=(10, 10))
+plt.imshow(np.isin(cracks_and_holes, list(non_circular)), cmap="Reds")
+plt.imshow(np.isin(cracks_and_holes, list(circular)), cmap="Greens", alpha=0.5)
+plt.imshow(np.isin(cracks_and_holes, list(broken_edge_segments)[1:]), cmap="Blues", alpha=0.5)
+plt.xlim(80,1180)
+plt.show()
+```
+
+Pozorování:
+- trhliny do kterých nesvítí vůbec jsou černé (minimální hodnota)
+- na okrajích vzorku je problém, nejspíš kvůli mediánovému filtru, který zde funguje asi dost omezeně, nebo kvůli náběhové hraně vzorku (vysoká hodnota, velká plocha na okraji masky)
+
+
+## Úloha do 31.8.
+
+- zpracovat crack_and_holes pro všechny zregistrovaná videa
+- vytvořit tabulku, které zpracuje masky
+- volitelně odštípnutý okraj definovat jako crack neznámé tloušťky (odpadlý okraj nezapočítávat)
+
+```python
+cracks_A = np.isin(cracks_and_holes, list(non_circular))
+pores = np.isin(cracks_and_holes, list(circular))
+boundary = np.isin(cracks_and_holes, list(broken_edge_segments)[1:])
+inner = closing(circle_mask - np.isin(cracks_and_holes, list(broken_edge_segments)[1:]), disk(8))
+cracks_B = np.logical_and(boundary, inner)
+cracks = np.logical_or(cracks_A, cracks_B)
+boundary = np.logical_and(boundary, np.logical_not(inner))
+# => cracks, pores, boundary
+```
+
+```python
+plt.figure(figsize=(10, 10))
+plt.imshow(cracks, cmap="Reds")
+plt.imshow(pores, cmap="Greens", alpha=0.5)
+plt.imshow(boundary, cmap="gray", alpha=0.5)
+plt.xlim(80,1180)
+plt.show()
+```
+
+```python
+from cracks import features
+```
+
+```python
+table1 = features.compute(cracks)
+```
+
+```python
+pd.DataFrame(table1).sort_values(by="crackSize_px", ascending=False)
+```
+
+a# Úhel dopadu světla
+
+**Hypotéza 3:** pokud není pixel součástí povrchu, který je paralelní ke snímači, bude mít jeho intenzita v rámci stacku velký rozptyl (nebo rozdíl max-min, ...). Tímto způsobem lze identifikovat plošky, které mají velkou odchylku od rovnoběžné plochy.
+
+**Hypotéza 4:** Plocha, která je natočená vůči rovině snímače bude mít pro jeden konkrétní úhel maximální intenzitu, pro úhel opačný minimální. Tím lze zjistit úhel této plochy.
+
+```python
+direction = (np.argmax(stack, axis=0) / len(stack) * 256).astype(np.uint8) * layers[-1][2]
+dir_med = median(direction, disk(11), mask=layers[-1][2])
+angle =  np.logical_and(np.abs(direction.astype(float) - dir_med.astype(float)) < 180, np.abs(direction.astype(float) - dir_med.astype(float)) > 60)
+```
+
+```python
+plt.figure(figsize=(15, 9))
+plt.imshow(angle, cmap="gray")
+plt.show()
+```
+
+Morfologie může mít problém v případě velkých děr (ale asi ne v případě velkých trhlin). Možná je výhodou, když díry budou mimo masku a nebudou se počítat do trhlin.
+
+Snímek je dobré normalizovat
+- oříznout podle masky
+- mediánovým filtrem (řeší různé plošky na vzorku)
+
+Úhel největší reflexivity má smysl řešit pouze pro pixely, kde je největší reflexivita signifikantně větší (tj. je tam nějaký reliéf).
+
+Bude nutné řešit kontext okolních pixelů (například floodfill s nějakou zajímavou podmínkou (v rámci segmentu se úhel mění o nějakou větší hodnotu => pór))
+
+
+Dle Zbyni je potřeba rozlišovat:
+- póry (nemají vliv na pevnost a jsou součástí betonu
+- trhliny (to je to co chceme měřit)
+- uštípnuté okraje (nezajímavé pro vyhodnocení)
+
+```python
+var = np.var(stack, axis=0)
+```
+
+```python
+max = np.max(stack, axis=0)
+min = np.min(stack, axis=0)
+max_med = median(max, footprint=disk(51), mask=layers[-1][2])
+min_med = median(min, footprint=disk(51), mask=layers[-1][2])
+```
+
+```python
+plt.figure(figsize=(15, 10))
+#plt.hist((max.astype(float) - medfilt.astype(float)).reshape(-1, 1), bins=100)
+#plt.imshow(np.logical_and(np.abs(max.astype(float) - medfilt.astype(float)) > 16, layers[-1][2]), cmap="gray")
+plt.imshow((max.astype(float) - max_med.astype(float) - (min.astype(float) - min_med.astype(float))) < 10, cmap="gray")
+#plt.imshow(layers[-1][2], cmap="gray")
+#plt.yscale("log")
+plt.show()
+```
+
+```python
+plt.figure(figsize=(15, 10))
+plt.imshow(np.min(stack, axis=0) < 20, cmap="gray")
+plt.show()
+```
+
+```python
+plt.figure(figsize=(15,10))
+plt.imshow(stack[0], cmap="gray")
+plt.xlim(800, 1000)
+plt.ylim(200, 400)
+plt.axhline(302, color="red")
+plt.axvline(950, color="red")
+
+plt.axhline(290, color="orange")
+plt.axvline(975, color="orange")
+
+plt.axhline(275, color="green")
+plt.axvline(922, color="green")
+
+plt.axhline(270, color="blue")
+plt.axvline(900, color="blue")
+plt.show()
+```
+
+<!-- #region -->
+Nerovnosti:
+
+Nerovnosti detekujeme pomocí prahování variability (max-min) nebo var.
+
+
+- trhliny - netriviální délka (segmentace podle velikosti?)
+- špína - totéž co výstupky
+- výstupky - světlé tečky, stín je velmi tenký, není vidět n a var, ale je vidět na max-min
+- bubliny - má uprostřed tmavou skvrnu
+<!-- #endregion -->
+
+```python
+points = [
+    [370, 980, "red", "hole boundary"],
+    [290, 975, "red", "hole boundary"],
+    [302, 950, "orange", "thick crack"],
+    [275, 922, "green", "thin crack"],
+    [270, 900, "blue", "flat surface"]
+]
+```
+
+```python
+plt.figure(figsize=(15, 10))
+ax = plt.subplot(121)
+ax.imshow(np.max(stack, axis=0) - np.min(stack, axis=0))
+ax.set_ylim(200, 400)
+ax.set_xlim(800, 1000)
+ax = plt.subplot(122)
+ax.imshow(var)
+ax.set_ylim(200, 400)
+ax.set_xlim(800, 1000)
+plt.scatter([x for _, x, _, _ in points], [y for y, _, _, _ in points], marker="o", c=[color for _, _, color, _ in points], s=70)
+plt.show()
+```
+
+```python
+for y, x, color,label in points:
+    plt.plot(stack[:, y, x], color=color, label=label)
+plt.legend()
+plt.show()
+```
+
+```python
+from scipy.ndimage import gaussian_filter1d
+```
+
+```python
+for y, x, color, label in points:
+    approx = gaussian_filter1d(stack[:, y, x].astype(np.float32), 5)
+    plt.plot(gaussian_filter1d(np.abs(stack[:, y, x].astype(np.float32) - approx), 11), color=color, label=label)
+plt.legend()
+plt.show()
+```
+
+```python
+from sklearn.cluster import KMeans
+```
+
+```python
+kmeans = KMeans(3).fit(stack[:, 200:900, 800:1500].reshape(stack.shape[0], -1).T)
+```
+
+```python
+stack_labels = kmeans.labels_.reshape(700, 700)
+```
+
+```python
+plt.imshow(stack_labels)
+```
+
+```python
+sample = stack[:, 200:900, 800:1500].reshape(stack.shape[0], -1).T
+```
+
+```python
+sample.shape
+```
+
+```python
+plt.figure(figsize=(15,5))
+plt.plot(np.argmax(gaussian_filter1d(sample[:700], 15, axis=1), axis=1))
+plt.plot(np.argmin(gaussian_filter1d(sample[:700], 15, axis=1), axis=1))
+plt.show()
+```
+
+```python
+plt.imshow(np.argmax(gaussian_filter1d(sample, 15, axis=1), axis=1).reshape(700, 700))
+```
+
+```python
+plt.figure(figsize=(10,10))
+plt.imshow(stack[0], cmap="gray")
+plt.xlim(80,1180)
+plt.show()
+```
+
+```python
+
+```
