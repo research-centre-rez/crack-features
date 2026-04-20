@@ -5,9 +5,9 @@ jupyter:
       extension: .md
       format_name: markdown
       format_version: '1.3'
-      jupytext_version: 1.17.2
+      jupytext_version: 1.19.1
   kernelspec:
-    display_name: Python 3
+    display_name: crack-features (3.11.13)
     language: python
     name: python3
 ---
@@ -42,19 +42,16 @@ Data bylo nutné rozdělit na jumbo vzorky a malé vzorky. Vyrobil jsem csv, kde
 Níže je filtrace podle třídy vzorku (pracuji jen se smallv1)
 
 ```python
-ROOT = "/Users/gimli/cvr/data/beton/erik"
+ROOT = "../../erik"
 metadata = pd.read_csv(os.path.join(ROOT, "metadata.csv"), header=None, names=["file path", "type"])
-print(f"Types of samples: {np.unique(metadata["type"]).tolist()}")
+print(f"Types of samples: {np.unique(metadata['type']).tolist()}")
 ```
 
 ```python
 # go thru directory and select only samples "smallv1"
 my_type = "smallv1"
 stack_files = metadata[metadata["type"] == my_type]["file path"].values.tolist()
-```
-
-```python
-stack_files
+print(stack_files)
 ```
 
 Hypotéza je, že stack obsahuje pouze dvě třídy betonový vzorek (popředí) a pozadí.
@@ -85,7 +82,7 @@ Hypotéza: vzorek má kruhový tvar.
 Aplikace: fitneme kruh na masku popředí. Penalizuji počtem pixelů, které mají být uvnitř masky a nejsou a počtem pixelů, které jsou vně kruhu a nemají být.
 
 ```python
-def fit_circle(mask, min_radius=500):
+def fit_circle(mask, min_radius=500, margin_reduction=0.0):
     def circle_error(params):
         center_x, center_y, radius = params
         y, x = np.where(mask == 1)
@@ -100,7 +97,180 @@ def fit_circle(mask, min_radius=500):
                            (min_radius, mask.shape[0] - min_radius),
                            (min_radius, min_radius * 1.25)),
                    method="COBYLA")
+                   
+    opt.x[2] = opt.x[2] * (1 - margin_reduction)
+    
     return opt
+
+from skimage.measure import label, regionprops
+from skimage.filters import frangi
+from skimage.morphology import disk, closing, dilation, remove_small_objects
+from skimage.exposure import equalize_adapthist
+import numpy as np
+
+def compute_optimal_projection(crop_stack): # standard deviation projection
+    std_proj = np.std(crop_stack, axis=0)
+    norm_std = (std_proj - np.min(std_proj)) / (np.max(std_proj) - np.min(std_proj) + 1e-8)
+    return equalize_adapthist(norm_std, clip_limit=0.02)
+
+def crack_bubble_segment(stack, circle_mask):
+    # 1. Bounding Box Optimization
+    y_idx, x_idx = np.where(circle_mask == 1)
+    if len(y_idx) == 0:
+        return np.zeros_like(circle_mask), np.zeros_like(circle_mask)
+        
+    ymin, ymax = np.min(y_idx), np.max(y_idx)
+    xmin, xmax = np.min(x_idx), np.max(x_idx)
+    
+    crop_mask = circle_mask[ymin:ymax+1, xmin:xmax+1]
+    
+    crop_stack = stack[:, ymin:ymax+1, xmin:xmax+1]
+    optimal_proj = compute_optimal_projection(crop_stack)
+    
+    # beta - tube "strictness", black_ridges - detect only black cracks
+    vesselness = frangi(optimal_proj, sigmas=(1, 2, 3, 4, 5), black_ridges=False, beta=0.15)
+    vesselness_masked = vesselness * crop_mask
+    
+    active_pixels = vesselness_masked[crop_mask == 1]
+    if len(active_pixels) == 0:
+        return np.zeros_like(circle_mask), np.zeros_like(circle_mask)
+        
+    crack_thresh = np.percentile(active_pixels, 75)
+    binary_cracks = vesselness_masked > crack_thresh
+    
+    cleaned_cracks = remove_small_objects(binary_cracks, min_size=150)
+    
+    # use shadows for bubble detection
+    crop_min_proj = np.min(crop_stack, axis=0)
+    norm_min = (crop_min_proj - np.min(crop_min_proj)) / (np.max(crop_min_proj) - np.min(crop_min_proj) + 1e-8)
+    crop_proj_eq = equalize_adapthist(norm_min, clip_limit=0.02)
+    
+    search_pixels = crop_proj_eq[crop_mask == 1]
+    crop_bubbles = np.zeros_like(crop_mask)
+    
+    if len(search_pixels) > 0:
+        bubble_thresh = np.percentile(search_pixels, 5) # hyperparameter
+        potential_bubbles = (crop_proj_eq < bubble_thresh) & crop_mask
+        labeled_bubbles = label(potential_bubbles)
+        
+        for prop in regionprops(labeled_bubbles):
+            if prop.area > 5 and prop.perimeter > 0:
+                circularity = (4 * np.pi * prop.area) / (prop.perimeter ** 2)
+                if circularity > 0.4:  # hyperparameter
+                    coords = prop.coords
+                    crop_bubbles[coords[:, 0], coords[:, 1]] = 1
+                    
+    full_cracks = np.zeros_like(circle_mask)
+    full_bubbles = np.zeros_like(circle_mask)
+    full_cracks[ymin:ymax+1, xmin:xmax+1] = 
+    full_bubbles[ymin:ymax+1, xmin:xmax+1] = crop_bubbles
+    
+    return full_cracks, full_bubbles
+```
+
+```python
+import cv2
+from scipy.ndimage import sobel
+from skimage.filters import frangi
+
+def detect_valleys_tophat(min_proj, max_feature_size=25):
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_feature_size, max_feature_size))
+    bottom_hat = cv2.morphologyEx(min_proj, cv2.MORPH_BLACKHAT, kernel)
+    
+    threshold = np.percentile(bottom_hat[bottom_hat > 0], 98)
+    return bottom_hat > threshold
+
+
+def detect_structural_variance(crop_stack, crop_mask):
+    std_proj = np.std(crop_stack, axis=0)
+    norm_std = (std_proj - np.min(std_proj)) / (np.max(std_proj) - np.min(std_proj) + 1e-8)
+    
+    vesselness = frangi(norm_std, sigmas=(1, 2, 3, 4), black_ridges=False, beta=0.15)
+    vesselness_masked = vesselness * crop_mask
+    
+    active_pixels = vesselness_masked[crop_mask == 1]
+    if len(active_pixels) == 0:
+        return np.zeros_like(crop_mask)
+        
+    threshold = np.percentile(active_pixels, 95)
+    return vesselness_masked > threshold
+
+
+def detect_anomalies(crop_stack, min_proj, crop_mask):
+    mask_tophat = detect_valleys_tophat(min_proj)
+    mask_variance = detect_structural_variance(crop_stack, crop_mask)
+    
+    combined_anomalies = mask_variance #| mask_tophat
+    
+    combined_anomalies = combined_anomalies & crop_mask
+    cleaned_anomalies = remove_small_objects(combined_anomalies, min_size=50)
+    
+    return closing(cleaned_anomalies, disk(1))
+```
+
+```python
+from skimage.measure import label, regionprops
+import numpy as np
+
+def convex_filter(anomaly_mask, lower_tresh = 10, line_tresh = 100):
+    labeled = label(anomaly_mask)
+    props = regionprops(labeled)
+    
+    cracks = np.zeros_like(anomaly_mask)
+    bubbles = np.zeros_like(anomaly_mask)
+    
+    for prop in props:
+        if prop.area < lower_tresh:
+            continue
+            
+        solidity = prop.solidity
+        eccentricity = prop.eccentricity
+        
+        if prop.minor_axis_length > 0:
+            aspect_ratio = prop.major_axis_length / prop.minor_axis_length
+        else:
+            aspect_ratio = 1.0
+
+        # low solidity - cracks
+        is_crack = (solidity < 0.5 or eccentricity > 0.80 or aspect_ratio > 3.0)
+        if  is_crack and prop.area > line_tresh:
+            coords = prop.coords
+            cracks[coords[:, 0], coords[:, 1]] = 1
+            continue
+            
+        # high solidity - bubbles
+        elif solidity >= 0.5 and eccentricity <= 0.80:
+            coords = prop.coords
+            bubbles[coords[:, 0], coords[:, 1]] = 1
+            
+    return cracks, bubbles
+```
+
+```python
+def segment_pipeline_geometric(stack, circle_mask):
+    y_idx, x_idx = np.where(circle_mask == 1)
+    if len(y_idx) == 0:
+        return np.zeros_like(circle_mask), np.zeros_like(circle_mask)
+        
+    ymin, ymax = np.min(y_idx), np.max(y_idx)
+    xmin, xmax = np.min(x_idx), np.max(x_idx)
+    
+    crop_mask = circle_mask[ymin:ymax+1, xmin:xmax+1]
+    crop_stack = stack[:, ymin:ymax+1, xmin:xmax+1]
+    min_proj = np.min(crop_stack, axis=0)
+    
+    anomalies = detect_anomalies(crop_stack, min_proj, crop_mask)
+    
+    crop_cracks, crop_bubbles = convex_filter(anomalies, lower_tresh=15)
+    crop_cracks = closing(crop_cracks, disk(5))
+    
+    
+    full_cracks = np.zeros_like(circle_mask)
+    full_bubbles = np.zeros_like(circle_mask)
+    full_cracks[ymin:ymax+1, xmin:xmax+1] = crop_cracks
+    full_bubbles[ymin:ymax+1, xmin:xmax+1] = crop_bubbles
+    
+    return full_cracks, full_bubbles
 ```
 
 **Batch run:** adaptive closing pro oprahované snímky a fitnutí kruhu na morfologicky upravenou masku.
@@ -109,27 +279,31 @@ def fit_circle(mask, min_radius=500):
 rows = np.ceil(len(stack_files) / 2).astype(int)
 layers = []
 plt.figure(figsize=(15, rows * 5))
+
 for i, stack_file in tqdm(enumerate(stack_files), total=len(stack_files), desc="computing masks"):
     try:
         stack = np.load(stack_file)
         mask, kernel_size, raw_mask = adaptive_closing(stack, 3)
-        circle = fit_circle(mask)
-        circle_mask = np.zeros_like(mask)
+        circle = fit_circle(mask, margin_reduction=0.05) 
+        
+        y_grid, x_grid = np.ogrid[:mask.shape[0], :mask.shape[1]]
+        circle_mask = (((x_grid - circle.x[0]) ** 2 + (y_grid - circle.x[1]) ** 2) <= circle.x[2] ** 2).astype(np.uint8)
 
-        for x in np.arange(circle_mask.shape[1]):
-            for y in np.arange(circle_mask.shape[0]):
-                if (x - circle.x[0]) ** 2 + (y - circle.x[1]) ** 2 <= circle.x[2] ** 2:
-                    circle_mask[y, x] = 1
-        layers.append([raw_mask, mask, circle_mask])
+        cracks, bubbles = crack_bubble_segment(stack, circle_mask)
+        layers.append([np.min(stack, axis=0), circle_mask, cracks, bubbles])
+        
         ax = plt.subplot(rows, 2, i + 1)
         ax.imshow(stack[100], cmap="gray")
-        ax.imshow(mask, cmap="Reds", alpha=0.5)
-        ax.add_patch(Circle((circle.x[0], circle.x[1]), circle.x[2], alpha=0.5))
-        ax.set_title(f"{os.path.basename(stack_file)}({kernel_size}): [{circle.x[0]:.0f},{circle.x[1]:.0f}] with {circle.x[2]:.0f}px radius (err {circle.fun})", fontsize=10)
-        ax.set_xticks([])
-        ax.set_yticks([])
+        ax.add_patch(Circle((circle.x[0], circle.x[1]), circle.x[2], edgecolor='white', facecolor='none', lw=1, alpha=0.5))
+        ax.imshow(np.where(cracks > 0, 1, np.nan), cmap="Reds", vmin=0, vmax=1, alpha=0.8)
+        ax.imshow(np.where(bubbles > 0, 1, np.nan), cmap="Blues", vmin=0, vmax=1, alpha=0.8)
+        ax.set_title(f"{os.path.basename(stack_file)}: [{circle.x[0]:.0f},{circle.x[1]:.0f}] r={circle.x[2]:.0f}px", fontsize=10)
+        ax.axis('off')
+        
     except Exception as e:
         print(f"{os.path.basename(stack_file)}: processing failed with {e}")
+
+plt.tight_layout()
 plt.show()
 ```
 
@@ -261,14 +435,11 @@ plt.show()
 
 ```python
 from cracks import features
-```
+import pandas as pd
 
-```python
-table1 = features.compute(cracks)
-```
-
-```python
-pd.DataFrame(table1).sort_values(by="crackSize_px", ascending=False)
+table_cracks = features.compute(cracks)
+df_cracks = pd.DataFrame(table_cracks).sort_values(by="crackSize_px", ascending=False)
+df_cracks.to_csv("original.csv")
 ```
 
 a# Úhel dopadu světla
