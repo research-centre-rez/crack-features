@@ -102,117 +102,145 @@ def fit_circle(mask, min_radius=500, margin_reduction=0.0):
     
     return opt
 
-from skimage.measure import label, regionprops
-from skimage.filters import frangi
-from skimage.morphology import disk, closing, dilation, remove_small_objects
-from skimage.exposure import equalize_adapthist
+
+```
+
+```python
+import pywt
 import numpy as np
 
-def compute_optimal_projection(crop_stack): # standard deviation projection
-    std_proj = np.std(crop_stack, axis=0)
-    norm_std = (std_proj - np.min(std_proj)) / (np.max(std_proj) - np.min(std_proj) + 1e-8)
-    return equalize_adapthist(norm_std, clip_limit=0.02)
+def denoise_swt(image, level=2, wavelet='haar'):
+    pad_y = (2**level) - (image.shape[0] % (2**level))
+    pad_x = (2**level) - (image.shape[1] % (2**level))
+    
+    padded_img = np.pad(image, ((0, pad_y), (0, pad_x)), mode='reflect')
+    
+    coeffs = pywt.swt2(padded_img, wavelet, level=level)
+    modified_coeffs = list(coeffs)
+    
+    
+    cA1, (cH1, cV1, cD1) = modified_coeffs[0]
+    modified_coeffs[0] = (cA1, (np.zeros_like(cH1), np.zeros_like(cV1), np.zeros_like(cD1)))
+    
+    if level >= 2:
+        cA2, (cH2, cV2, cD2) = modified_coeffs[1]
+        modified_coeffs[1] = (cA2, (np.zeros_like(cH2), np.zeros_like(cV2), np.zeros_like(cD2)))
+    
+    clean_padded = pywt.iswt2(modified_coeffs, wavelet)
+    
+    return clean_padded[:image.shape[0], :image.shape[1]]
 
-def crack_bubble_segment(stack, circle_mask):
-    # 1. Bounding Box Optimization
-    y_idx, x_idx = np.where(circle_mask == 1)
-    if len(y_idx) == 0:
-        return np.zeros_like(circle_mask), np.zeros_like(circle_mask)
+import scipy.ndimage as ndi
+
+def prune_skeleton(skel, num_iter=12):
+    pruned = skel.copy()
+    kernel = np.array([[1, 1, 1],
+                       [1, 0, 1],
+                       [1, 1, 1]])
+    
+    for _ in range(num_iter):
+        neighbor_count = ndi.convolve(pruned.astype(int), kernel, mode='constant')
+        endpoints = pruned & (neighbor_count == 1)
+        pruned = pruned & ~endpoints
         
-    ymin, ymax = np.min(y_idx), np.max(y_idx)
-    xmin, xmax = np.min(x_idx), np.max(x_idx)
-    
-    crop_mask = circle_mask[ymin:ymax+1, xmin:xmax+1]
-    
-    crop_stack = stack[:, ymin:ymax+1, xmin:xmax+1]
-    optimal_proj = compute_optimal_projection(crop_stack)
-    
-    # beta - tube "strictness", black_ridges - detect only black cracks
-    vesselness = frangi(optimal_proj, sigmas=(1, 2, 3, 4, 5), black_ridges=False, beta=0.15)
-    vesselness_masked = vesselness * crop_mask
-    
-    active_pixels = vesselness_masked[crop_mask == 1]
-    if len(active_pixels) == 0:
-        return np.zeros_like(circle_mask), np.zeros_like(circle_mask)
-        
-    crack_thresh = np.percentile(active_pixels, 75)
-    binary_cracks = vesselness_masked > crack_thresh
-    
-    cleaned_cracks = remove_small_objects(binary_cracks, min_size=150)
-    
-    # use shadows for bubble detection
-    crop_min_proj = np.min(crop_stack, axis=0)
-    norm_min = (crop_min_proj - np.min(crop_min_proj)) / (np.max(crop_min_proj) - np.min(crop_min_proj) + 1e-8)
-    crop_proj_eq = equalize_adapthist(norm_min, clip_limit=0.02)
-    
-    search_pixels = crop_proj_eq[crop_mask == 1]
-    crop_bubbles = np.zeros_like(crop_mask)
-    
-    if len(search_pixels) > 0:
-        bubble_thresh = np.percentile(search_pixels, 5) # hyperparameter
-        potential_bubbles = (crop_proj_eq < bubble_thresh) & crop_mask
-        labeled_bubbles = label(potential_bubbles)
-        
-        for prop in regionprops(labeled_bubbles):
-            if prop.area > 5 and prop.perimeter > 0:
-                circularity = (4 * np.pi * prop.area) / (prop.perimeter ** 2)
-                if circularity > 0.4:  # hyperparameter
-                    coords = prop.coords
-                    crop_bubbles[coords[:, 0], coords[:, 1]] = 1
-                    
-    full_cracks = np.zeros_like(circle_mask)
-    full_bubbles = np.zeros_like(circle_mask)
-    full_cracks[ymin:ymax+1, xmin:xmax+1] = 
-    full_bubbles[ymin:ymax+1, xmin:xmax+1] = crop_bubbles
-    
-    return full_cracks, full_bubbles
+    return pruned
 ```
 
 ```python
 import cv2
-from scipy.ndimage import sobel
-from skimage.filters import frangi
+import numpy as np
+from skimage.filters import frangi, apply_hysteresis_threshold
+from skimage.morphology import disk, remove_small_objects, dilation, skeletonize, opening
+from phasepack import phasecong
 
-def detect_valleys_tophat(min_proj, max_feature_size=25):
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_feature_size, max_feature_size))
-    bottom_hat = cv2.morphologyEx(min_proj, cv2.MORPH_BLACKHAT, kernel)
+def detect_valleys_tophat(min_proj, crop_mask, max_feature_size=25):
+    smoothed_min = opening(min_proj, disk(3))
     
-    threshold = np.percentile(bottom_hat[bottom_hat > 0], 98)
-    return bottom_hat > threshold
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_feature_size, max_feature_size))
+    bottom_hat = cv2.morphologyEx(smoothed_min, cv2.MORPH_BLACKHAT, kernel)
+    
+    active_pixels = bottom_hat[crop_mask == 1]
+    threshold = np.percentile(active_pixels[active_pixels > 0], 98)
+    return (bottom_hat > threshold) & crop_mask
 
-
-def detect_structural_variance(crop_stack, crop_mask):
+def detect_structural_variance(crop_stack, crop_mask, bubbles_to_ignore=None):
     std_proj = np.std(crop_stack, axis=0)
+    
+    if bubbles_to_ignore is not None:
+        shield = dilation(bubbles_to_ignore, disk(3))
+        background_median = np.median(std_proj[crop_mask == 1])
+        std_proj[shield] = background_median
+        
     norm_std = (std_proj - np.min(std_proj)) / (np.max(std_proj) - np.min(std_proj) + 1e-8)
     
-    vesselness = frangi(norm_std, sigmas=(1, 2, 3, 4), black_ridges=False, beta=0.15)
+    vesselness = frangi(norm_std, sigmas=(1, 2, 3, 4), black_ridges=False, beta=0.10)
     vesselness_masked = vesselness * crop_mask
     
+    if bubbles_to_ignore is not None:
+        lead_wall = dilation(bubbles_to_ignore, disk(3))
+        vesselness_masked[lead_wall] = 0.0
+    
     active_pixels = vesselness_masked[crop_mask == 1]
-    if len(active_pixels) == 0:
-        return np.zeros_like(crop_mask)
         
-    threshold = np.percentile(active_pixels, 95)
-    return vesselness_masked > threshold
+    high_thresh = np.percentile(active_pixels, 97) 
+    low_thresh = np.percentile(active_pixels, 88)  
+    
+    hyst_mask = apply_hysteresis_threshold(phase_map, low_thresh, high_thresh)
+    
+    thinned_cracks = skeletonize(hyst_mask)
+    thinned_cracks = prune_skeleton(thinned_cracks, num_iter=8) 
+    flow_restricted_cracks = dilation(thinned_cracks, disk(1))
 
+    return flow_restricted_cracks & crop_mask
+
+
+
+def detect_structural_phase(crop_stack, crop_mask, bubbles_to_ignore=None):
+    std_proj = denoise_swt(np.std(crop_stack, axis=0))
+    
+    if bubbles_to_ignore is not None:
+        shield = dilation(bubbles_to_ignore, disk(5))
+        background_median = np.median(std_proj[crop_mask == 1])
+        std_proj[shield] = background_median
+        
+    PC = phasecong(std_proj, nscale=6, norient=8, minWaveLength=3, mult=1.8, sigmaOnf=0.55, k=1.2, )
+    phase_map = PC[0] * crop_mask
+    
+    active_pixels = phase_map[crop_mask == 1]
+
+    high_thresh = np.percentile(active_pixels, 98) 
+    low_thresh = np.percentile(active_pixels, 80)  
+    
+    # remove small seeds around the cracks
+    raw_seeds = phase_map > high_thresh
+    clean_seeds = remove_small_objects(raw_seeds, min_size=50)
+    deleted_noise = raw_seeds & ~clean_seeds
+    phase_map[deleted_noise] = 0.0
+    
+    hyst_mask = apply_hysteresis_threshold(phase_map, low_thresh, high_thresh)
+    thinned_cracks = skeletonize(hyst_mask)
+    
+    flow_restricted_cracks = dilation(thinned_cracks, disk(1))
+
+    return hyst_mask & crop_mask
 
 def detect_anomalies(crop_stack, min_proj, crop_mask):
-    mask_tophat = detect_valleys_tophat(min_proj)
-    mask_variance = detect_structural_variance(crop_stack, crop_mask)
+    mask_tophat = detect_valleys_tophat(min_proj, crop_mask)
+    # mask_variance = detect_structural_variance(crop_stack, crop_mask, bubbles_to_ignore=mask_tophat)
+    mask_variance = detect_structural_phase(crop_stack, crop_mask, bubbles_to_ignore=mask_tophat)
     
-    combined_anomalies = mask_variance #| mask_tophat
-    
+
+    combined_anomalies = mask_variance | mask_tophat
     combined_anomalies = combined_anomalies & crop_mask
-    cleaned_anomalies = remove_small_objects(combined_anomalies, min_size=50)
     
-    return closing(cleaned_anomalies, disk(1))
+    return remove_small_objects(combined_anomalies, min_size=100)
 ```
 
 ```python
 from skimage.measure import label, regionprops
 import numpy as np
 
-def convex_filter(anomaly_mask, lower_tresh = 10, line_tresh = 100):
+def convex_filter(anomaly_mask, lower_tresh=50, line_tresh=150, min_physical_length=100):
     labeled = label(anomaly_mask)
     props = regionprops(labeled)
     
@@ -225,23 +253,19 @@ def convex_filter(anomaly_mask, lower_tresh = 10, line_tresh = 100):
             
         solidity = prop.solidity
         eccentricity = prop.eccentricity
-        
-        if prop.minor_axis_length > 0:
-            aspect_ratio = prop.major_axis_length / prop.minor_axis_length
-        else:
-            aspect_ratio = 1.0
 
-        # low solidity - cracks
-        is_crack = (solidity < 0.5 or eccentricity > 0.80 or aspect_ratio > 3.0)
-        if  is_crack and prop.area > line_tresh:
-            coords = prop.coords
-            cracks[coords[:, 0], coords[:, 1]] = 1
-            continue
-            
-        # high solidity - bubbles
-        elif solidity >= 0.5 and eccentricity <= 0.80:
+        if solidity >= 0.70 and eccentricity < 0.95:
             coords = prop.coords
             bubbles[coords[:, 0], coords[:, 1]] = 1
+            continue
+
+        is_long_enough = (prop.major_axis_length > min_physical_length)
+        is_crack = (solidity < 0.30) or (eccentricity > 0.95 and solidity < 0.8)
+        
+        if is_crack and prop.area > line_tresh and is_long_enough:
+            coords = prop.coords
+            cracks[coords[:, 0], coords[:, 1]] = 1
+            
             
     return cracks, bubbles
 ```
@@ -262,8 +286,6 @@ def segment_pipeline_geometric(stack, circle_mask):
     anomalies = detect_anomalies(crop_stack, min_proj, crop_mask)
     
     crop_cracks, crop_bubbles = convex_filter(anomalies, lower_tresh=15)
-    crop_cracks = closing(crop_cracks, disk(5))
-    
     
     full_cracks = np.zeros_like(circle_mask)
     full_bubbles = np.zeros_like(circle_mask)
@@ -273,12 +295,12 @@ def segment_pipeline_geometric(stack, circle_mask):
     return full_cracks, full_bubbles
 ```
 
-**Batch run:** adaptive closing pro oprahované snímky a fitnutí kruhu na morfologicky upravenou masku.
-
 ```python
 rows = np.ceil(len(stack_files) / 2).astype(int)
 layers = []
 plt.figure(figsize=(15, rows * 5))
+
+stack_files = stack_files[:5]
 
 for i, stack_file in tqdm(enumerate(stack_files), total=len(stack_files), desc="computing masks"):
     try:
@@ -289,7 +311,7 @@ for i, stack_file in tqdm(enumerate(stack_files), total=len(stack_files), desc="
         y_grid, x_grid = np.ogrid[:mask.shape[0], :mask.shape[1]]
         circle_mask = (((x_grid - circle.x[0]) ** 2 + (y_grid - circle.x[1]) ** 2) <= circle.x[2] ** 2).astype(np.uint8)
 
-        cracks, bubbles = crack_bubble_segment(stack, circle_mask)
+        cracks, bubbles = segment_pipeline_geometric(stack, circle_mask)
         layers.append([np.min(stack, axis=0), circle_mask, cracks, bubbles])
         
         ax = plt.subplot(rows, 2, i + 1)
@@ -306,6 +328,9 @@ for i, stack_file in tqdm(enumerate(stack_files), total=len(stack_files), desc="
 plt.tight_layout()
 plt.show()
 ```
+
+**Batch run:** adaptive closing pro oprahované snímky a fitnutí kruhu na morfologicky upravenou masku.
+
 
 # Signifikantní rozdíl v intenzitě
 
@@ -439,7 +464,7 @@ import pandas as pd
 
 table_cracks = features.compute(cracks)
 df_cracks = pd.DataFrame(table_cracks).sort_values(by="crackSize_px", ascending=False)
-df_cracks.to_csv("original.csv")
+df_cracks.to_csv("swt_phase.csv")
 ```
 
 a# Úhel dopadu světla
