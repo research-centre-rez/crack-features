@@ -25,17 +25,25 @@ Erik připravil data to superpozice. Nyní je potřeba:
 
 ```python
 import os
-
+import gc
 import cv2
+import pywt
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
-from skimage.morphology import label
-from scipy.optimize import minimize
+import scipy.ndimage as ndi
 from matplotlib.patches import Circle
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+from skimage.morphology import label, disk, remove_small_objects, dilation, skeletonize, opening, closing
+from skimage.filters import apply_hysteresis_threshold
+from phasepack import phasecong
+from skimage.measure import regionprops
 from tqdm.auto import tqdm
-from skimage.filters.rank import median
-from skimage.morphology import disk, binary_erosion, closing
+import sys
+
+sys.path.append("../..")
+
+from cracks import features
 ```
 
 Data bylo nutné rozdělit na jumbo vzorky a malé vzorky. Vyrobil jsem csv, kde jsou označeny.
@@ -62,8 +70,6 @@ Aby morfologie měla co nejméně drastický dopad, tak se velikost kruhového k
 
 ```python
 def adaptive_closing(stack, threshold=10):
-    # Adaptive closing
-    # - increases size of the circular kernel until only one segment remains
     morph_size = 1
     intensity_threshold = threshold
     raw_mask = np.min(stack, axis=0) < intensity_threshold
@@ -82,33 +88,72 @@ Hypotéza: vzorek má kruhový tvar.
 Aplikace: fitneme kruh na masku popředí. Penalizuji počtem pixelů, které mají být uvnitř masky a nejsou a počtem pixelů, které jsou vně kruhu a nemají být.
 
 ```python
-def fit_circle(mask, min_radius=500, margin_reduction=0.0):
-    def circle_error(params):
-        center_x, center_y, radius = params
-        y, x = np.where(mask == 1)
-        pos = np.sum((x - center_x) ** 2 + (y - center_y) ** 2 > radius ** 2)
-        y, x = np.where(mask == 0)
-        neg = np.sum((x - center_x) ** 2 + (y - center_y) ** 2 <= (radius - 1) ** 2)
-        return pos + neg
+# def fit_circle(mask, min_radius=500, margin_reduction=0.0):
+#     def circle_error(params):
+#         center_x, center_y, radius = params
+#         y, x = np.where(mask == 1)
+#         pos = np.sum((x - center_x) ** 2 + (y - center_y) ** 2 > radius ** 2)
+#         y, x = np.where(mask == 0)
+#         neg = np.sum((x - center_x) ** 2 + (y - center_y) ** 2 <= (radius - 1) ** 2)
+#         return pos + neg
 
-    opt = minimize(circle_error,
-                   x0=[mask.shape[1] / 2, mask.shape[0] / 2, min_radius * 1.125],
-                   bounds=((min_radius, mask.shape[1] - min_radius),
-                           (min_radius, mask.shape[0] - min_radius),
-                           (min_radius, min_radius * 1.25)),
-                   method="COBYLA")
+#     opt = minimize(circle_error,
+#                    x0=[mask.shape[1] / 2, mask.shape[0] / 2, min_radius * 1.125],
+#                    bounds=((min_radius, mask.shape[1] - min_radius),
+#                            (min_radius, mask.shape[0] - min_radius),
+#                            (min_radius, min_radius * 1.25)),
+#                    method="COBYLA")
                    
-    opt.x[2] = opt.x[2] * (1 - margin_reduction)
+#     opt.x[2] = opt.x[2] * (1 - margin_reduction)
     
-    return opt
+#     return opt
 
 
+import cv2
+
+class CircleFitResult:
+    def __init__(self, x, y, r):
+        self.x = [x, y, r]
+
+def fit_circle(mask, min_radius=450, margin_reduction=0.0):
+    if mask.max() <= 1:
+        mask_uint8 = (mask.astype(np.uint8) * 255)
+    else:
+        mask_uint8 = mask.astype(np.uint8)
+
+    circles = cv2.HoughCircles(
+        mask_uint8,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=max(mask.shape), 
+        param1=50,
+        param2=20,
+        minRadius=min_radius,
+        maxRadius=min(mask.shape) // 2
+    )
+
+    if circles is not None:
+        best_circle = circles[0, 0]
+        center_x = best_circle[0]
+        center_y = best_circle[1]
+        radius = best_circle[2]
+    else:
+        M = cv2.moments(mask_uint8)
+        if M["m00"] != 0:
+            center_x = M["m10"] / M["m00"]
+            center_y = M["m01"] / M["m00"]
+            area = M["m00"] / 255.0
+            radius = np.sqrt(area / np.pi)
+        else:
+            center_x, center_y = mask.shape[1] / 2, mask.shape[0] / 2
+            radius = min_radius
+
+    radius = radius * (1 - margin_reduction)
+
+    return CircleFitResult(center_x, center_y, radius)
 ```
 
 ```python
-import pywt
-import numpy as np
-
 def denoise_swt(image, level=2, wavelet='haar'):
     pad_y = (2**level) - (image.shape[0] % (2**level))
     pad_x = (2**level) - (image.shape[1] % (2**level))
@@ -130,9 +175,7 @@ def denoise_swt(image, level=2, wavelet='haar'):
     
     return clean_padded[:image.shape[0], :image.shape[1]]
 
-import scipy.ndimage as ndi
-
-def prune_skeleton(skel, num_iter=12):
+def prune_skeleton(skel, num_iter=20):
     pruned = skel.copy()
     kernel = np.array([[1, 1, 1],
                        [1, 0, 1],
@@ -147,12 +190,6 @@ def prune_skeleton(skel, num_iter=12):
 ```
 
 ```python
-import cv2
-import numpy as np
-from skimage.filters import frangi, apply_hysteresis_threshold
-from skimage.morphology import disk, remove_small_objects, dilation, skeletonize, opening
-from phasepack import phasecong
-
 def detect_valleys_tophat(min_proj, crop_mask, max_feature_size=25):
     smoothed_min = opening(min_proj, disk(3))
     
@@ -160,86 +197,175 @@ def detect_valleys_tophat(min_proj, crop_mask, max_feature_size=25):
     bottom_hat = cv2.morphologyEx(smoothed_min, cv2.MORPH_BLACKHAT, kernel)
     
     active_pixels = bottom_hat[crop_mask == 1]
-    threshold = np.percentile(active_pixels[active_pixels > 0], 98)
+    active_pixels = active_pixels[active_pixels > 0]
+
+    if len(active_pixels) == 0:
+        return np.zeros_like(crop_mask, dtype=bool)
+    
+    threshold = np.percentile(active_pixels, 95)
     return (bottom_hat > threshold) & crop_mask
 
-def detect_structural_variance(crop_stack, crop_mask, bubbles_to_ignore=None):
+import numpy as np
+from skimage.filters import meijering, apply_hysteresis_threshold, frangi
+from skimage.morphology import disk, remove_small_objects, skeletonize, dilation
+
+def detect_structural_meijering(crop_stack, crop_mask, bubbles_to_ignore=None):
+    std_proj = np.std(crop_stack, axis=0)
+    
+    if bubbles_to_ignore is not None:
+        shield = dilation(bubbles_to_ignore, disk(5))
+        background_median = np.median(std_proj[crop_mask == 1])
+        std_proj[shield] = background_median
+    
+    smooth_std = ndi.gaussian_filter(std_proj, sigma=1.5)
+    norm_std = (smooth_std - np.min(smooth_std)) / (np.max(smooth_std) - np.min(smooth_std) + 1e-8)
+    
+    tubeness = meijering(
+        norm_std, 
+        sigmas=range(2, 20, 1), # [2, 3, 4, 5]
+        black_ridges=False # cracks are bright in std_proj
+    )
+    # outputs a [0, 1] continous prob map =>
+    # lower low_tresh?? to extend into weaker links?
+ 
+    tubeness_masked = tubeness * crop_mask
+    active_pixels = tubeness_masked[crop_mask == 1]
+    
+    high_thresh = np.percentile(active_pixels, 97)
+    low_thresh = np.percentile(active_pixels, 80) 
+    
+    hyst_mask = apply_hysteresis_threshold(tubeness_masked, low_thresh, high_thresh)
+
+    clean_cracks = remove_small_objects(hyst_mask, max_size=500)
+    
+    closed_cracks = closing(clean_cracks, disk(2))
+    thinned_cracks = skeletonize(closed_cracks)
+    thinned_cracks = prune_skeleton(thinned_cracks, num_iter=20) 
+    flow_restricted_cracks = dilation(thinned_cracks, disk(3))
+
+    return flow_restricted_cracks & crop_mask
+
+def detect_hybrid_cracks(crop_stack, crop_mask, bubbles_to_ignore=None):
+    std_proj = np.std(crop_stack, axis=0)
+    
+    if bubbles_to_ignore is not None:
+        shield = dilation(bubbles_to_ignore, disk(5))
+        std_proj[shield] = np.median(std_proj[crop_mask == 1])
+        
+    smooth_std_thin = ndi.gaussian_filter(std_proj, sigma=1.0)
+    norm_thin = (smooth_std_thin - np.min(smooth_std_thin)) / (np.max(smooth_std_thin) - np.min(smooth_std_thin) + 1e-8)
+    
+    tubeness_meijering = meijering(norm_thin, sigmas=range(2, 6, 1), black_ridges=False) * crop_mask
+    
+    active_m = tubeness_meijering[crop_mask == 1]
+    mask_meijering = apply_hysteresis_threshold(
+        tubeness_meijering, 
+        np.percentile(active_m, 78), 
+        np.percentile(active_m, 96)
+    )
+
+    smooth_std_wide = ndi.gaussian_filter(std_proj, sigma=3.5)
+    norm_wide = (smooth_std_wide - np.min(smooth_std_wide)) / (np.max(smooth_std_wide) - np.min(smooth_std_wide) + 1e-8)
+    
+    tubeness_frangi = frangi(norm_wide, sigmas=range(6, 14, 2), black_ridges=False, beta=0.5) * crop_mask
+    
+    active_f = tubeness_frangi[crop_mask == 1]
+    mask_frangi = tubeness_frangi > np.percentile(active_f, 98.5)
+
+    fused_mask = mask_meijering | mask_frangi
+    
+    closed_cracks = closing(fused_mask, disk(3))
+    
+    clean_cracks = remove_small_objects(closed_cracks, min_size=80)
+    
+    thinned_cracks = skeletonize(clean_cracks)
+    thinned_cracks = prune_skeleton(thinned_cracks, num_iter=15) 
+    
+    flow_restricted_cracks = dilation(thinned_cracks, disk(3))
+
+    return flow_restricted_cracks & crop_mask
+
+def detect_structural_phase(crop_stack, crop_mask, bubbles_to_ignore=None):
+    # std_proj = denoise_swt(np.std(crop_stack, axis=0))
     std_proj = np.std(crop_stack, axis=0)
     
     if bubbles_to_ignore is not None:
         shield = dilation(bubbles_to_ignore, disk(3))
         background_median = np.median(std_proj[crop_mask == 1])
         std_proj[shield] = background_median
+
+    
         
-    norm_std = (std_proj - np.min(std_proj)) / (np.max(std_proj) - np.min(std_proj) + 1e-8)
-    
-    vesselness = frangi(norm_std, sigmas=(1, 2, 3, 4), black_ridges=False, beta=0.10)
-    vesselness_masked = vesselness * crop_mask
-    
-    if bubbles_to_ignore is not None:
-        lead_wall = dilation(bubbles_to_ignore, disk(3))
-        vesselness_masked[lead_wall] = 0.0
-    
-    active_pixels = vesselness_masked[crop_mask == 1]
-        
-    high_thresh = np.percentile(active_pixels, 97) 
-    low_thresh = np.percentile(active_pixels, 88)  
-    
-    hyst_mask = apply_hysteresis_threshold(phase_map, low_thresh, high_thresh)
-    
-    thinned_cracks = skeletonize(hyst_mask)
-    thinned_cracks = prune_skeleton(thinned_cracks, num_iter=8) 
-    flow_restricted_cracks = dilation(thinned_cracks, disk(1))
-
-    return flow_restricted_cracks & crop_mask
-
-
-
-def detect_structural_phase(crop_stack, crop_mask, bubbles_to_ignore=None):
-    std_proj = denoise_swt(np.std(crop_stack, axis=0))
-    
-    if bubbles_to_ignore is not None:
-        shield = dilation(bubbles_to_ignore, disk(5))
-        background_median = np.median(std_proj[crop_mask == 1])
-        std_proj[shield] = background_median
-        
-    PC = phasecong(std_proj, nscale=6, norient=8, minWaveLength=3, mult=1.8, sigmaOnf=0.55, k=1.2, )
+    PC = phasecong(std_proj, nscale=7, norient=8, minWaveLength=3, mult=1.8, sigmaOnf=0.55, k=1.5)
     phase_map = PC[0] * crop_mask
     
     active_pixels = phase_map[crop_mask == 1]
 
-    high_thresh = np.percentile(active_pixels, 98) 
-    low_thresh = np.percentile(active_pixels, 80)  
+    if len(active_pixels) == 0:
+        return np.zeros_like(crop_mask, dtype=bool)
+
+    high_thresh = np.percentile(active_pixels, 96) 
+    low_thresh = np.percentile(active_pixels, 85)  
     
-    # remove small seeds around the cracks
     raw_seeds = phase_map > high_thresh
-    clean_seeds = remove_small_objects(raw_seeds, min_size=50)
+    clean_seeds = remove_small_objects(raw_seeds, max_size=200)
     deleted_noise = raw_seeds & ~clean_seeds
-    phase_map[deleted_noise] = 0.0
+    
+    noise_footprint = dilation(deleted_noise, disk(3))
+    phase_map[noise_footprint] = 0.0
     
     hyst_mask = apply_hysteresis_threshold(phase_map, low_thresh, high_thresh)
-    thinned_cracks = skeletonize(hyst_mask)
     
-    flow_restricted_cracks = dilation(thinned_cracks, disk(1))
+    hyst_mask = remove_small_objects(hyst_mask.astype(bool), max_size=150)
+    
+    thinned_cracks = skeletonize(hyst_mask)
+    thinned_cracks = prune_skeleton(thinned_cracks, num_iter=20) 
+    
+    flow_restricted_cracks = dilation(thinned_cracks, disk(5))
 
-    return hyst_mask & crop_mask
+    return flow_restricted_cracks & crop_mask
 
 def detect_anomalies(crop_stack, min_proj, crop_mask):
     mask_tophat = detect_valleys_tophat(min_proj, crop_mask)
-    # mask_variance = detect_structural_variance(crop_stack, crop_mask, bubbles_to_ignore=mask_tophat)
-    mask_variance = detect_structural_phase(crop_stack, crop_mask, bubbles_to_ignore=mask_tophat)
+    # mask_variance = detect_structural_phase(crop_stack, crop_mask, bubbles_to_ignore=mask_tophat)
+    # mask_variance = detect_structural_meijering(crop_stack, crop_mask, bubbles_to_ignore=mask_tophat)
+    mask_variance = detect_hybrid_cracks(crop_stack, crop_mask, bubbles_to_ignore=mask_tophat)
     
-
     combined_anomalies = mask_variance | mask_tophat
     combined_anomalies = combined_anomalies & crop_mask
     
-    return remove_small_objects(combined_anomalies, min_size=100)
+    return remove_small_objects(combined_anomalies.astype(bool), max_size=60)
+
+def convex_filter(anomaly_mask, lower_tresh=50, line_tresh=200, min_physical_length=100):
+    labeled = label(anomaly_mask)
+    props = regionprops(labeled)
+    cracks = np.zeros_like(anomaly_mask)
+    bubbles = np.zeros_like(anomaly_mask)
+    
+    for prop in props:
+        if prop.area < lower_tresh:
+            continue
+            
+        solidity = prop.solidity
+        eccentricity = prop.eccentricity
+
+        if solidity >= 0.70 and eccentricity < 0.95:
+            coords = prop.coords
+            bubbles[coords[:, 0], coords[:, 1]] = 1
+            continue
+
+        is_long_enough = (prop.axis_major_length > min_physical_length)
+        is_crack = (solidity < 0.30) or (eccentricity > 0.95 and solidity < 0.8)
+        
+        if is_crack and prop.area > line_tresh and is_long_enough:
+            coords = prop.coords
+            cracks[coords[:, 0], coords[:, 1]] = 1
+            
+    return cracks, bubbles
+
 ```
 
 ```python
-from skimage.measure import label, regionprops
-import numpy as np
-
 def convex_filter(anomaly_mask, lower_tresh=50, line_tresh=150, min_physical_length=100):
     labeled = label(anomaly_mask)
     props = regionprops(labeled)
@@ -259,7 +385,7 @@ def convex_filter(anomaly_mask, lower_tresh=50, line_tresh=150, min_physical_len
             bubbles[coords[:, 0], coords[:, 1]] = 1
             continue
 
-        is_long_enough = (prop.major_axis_length > min_physical_length)
+        is_long_enough = (prop.axis_major_length > min_physical_length)
         is_crack = (solidity < 0.30) or (eccentricity > 0.95 and solidity < 0.8)
         
         if is_crack and prop.area > line_tresh and is_long_enough:
@@ -273,17 +399,19 @@ def convex_filter(anomaly_mask, lower_tresh=50, line_tresh=150, min_physical_len
 ```python
 def segment_pipeline_geometric(stack, circle_mask):
     y_idx, x_idx = np.where(circle_mask == 1)
-    if len(y_idx) == 0:
-        return np.zeros_like(circle_mask), np.zeros_like(circle_mask)
         
     ymin, ymax = np.min(y_idx), np.max(y_idx)
     xmin, xmax = np.min(x_idx), np.max(x_idx)
     
     crop_mask = circle_mask[ymin:ymax+1, xmin:xmax+1]
     crop_stack = stack[:, ymin:ymax+1, xmin:xmax+1]
-    min_proj = np.min(crop_stack, axis=0)
+    # min_proj = np.min(crop_stack, axis=0)
+
+    q_low_proj = np.quantile(stack, 0.05, axis=0).astype(np.float32)
+    q_high_proj = np.quantile(stack, 0.95, axis=0).astype(np.float32)
+    diff_proj = q_high_proj - q_low_proj # diff between 95th and 5th percentiles in stack
     
-    anomalies = detect_anomalies(crop_stack, min_proj, crop_mask)
+    anomalies = detect_anomalies(crop_stack, diff_proj, crop_mask)
     
     crop_cracks, crop_bubbles = convex_filter(anomalies, lower_tresh=15)
     
@@ -300,7 +428,7 @@ rows = np.ceil(len(stack_files) / 2).astype(int)
 layers = []
 plt.figure(figsize=(15, rows * 5))
 
-stack_files = stack_files[:5]
+stack_files = stack_files[:10]
 
 for i, stack_file in tqdm(enumerate(stack_files), total=len(stack_files), desc="computing masks"):
     try:
@@ -329,6 +457,53 @@ plt.tight_layout()
 plt.show()
 ```
 
+```python
+import os
+import gc
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm.auto import tqdm
+
+
+verify_files = stack_files[:5] 
+rows = len(verify_files)
+
+plt.figure(figsize=(20, rows * 6))
+
+for i, stack_file in tqdm(enumerate(verify_files), total=len(verify_files), desc="Verifying Quantile Projections"):
+    try:
+        stack = np.load(stack_file)
+        
+        q05_proj = np.quantile(stack, q_low, axis=0).astype(np.float32)
+        q95_proj = np.quantile(stack, q_high, axis=0).astype(np.float32)
+        
+        ax1 = plt.subplot(rows, 3, 3*i + 1)
+        ax1.imshow(q05_proj, cmap="gray")
+        ax1.set_title(f"5th Quantile (Valley Map) - {os.path.basename(stack_file)}", fontsize=11)
+        ax1.axis('off')
+        
+        ax2 = plt.subplot(rows, 3, 3*i + 2)
+        ax2.imshow(q95_proj, cmap="gray")
+        ax2.set_title(f"95th Quantile (Baseline Map) - {os.path.basename(stack_file)}", fontsize=11)
+        ax2.axis('off')
+
+        minmaxdiff = q95_proj - q05_proj
+        ax2 = plt.subplot(rows, 3, 3*i + 3)
+        ax2.imshow(minmaxdiff, cmap="gray")
+        ax2.set_title(f"95th - 05th Quantile - {os.path.basename(stack_file)}", fontsize=11)
+        ax2.axis('off')
+        
+        del stack, q05_proj, q95_proj
+        gc.collect()
+        
+    except Exception as e:
+        print(f"Skipping {os.path.basename(stack_file)}: {e}")
+        continue 
+
+plt.tight_layout()
+plt.show()
+```
+
 **Batch run:** adaptive closing pro oprahované snímky a fitnutí kruhu na morfologicky upravenou masku.
 
 
@@ -343,8 +518,8 @@ Je nutné zajistit spojitost/nejspojitost segmentů, nebo jinak řešit co je se
 Níže je naivní řešení bez dělení segmentů.
 
 ```python
-max = np.max(stack, axis=0)
-min = np.min(stack, axis=0)
+# max = np.max(stack, axis=0)
+# min = np.min(stack, axis=0)
 # Tady je otázka čím by se to mělo rozmazávat ... velikost disku je poměrně zásadní pro finální výsledek
 # Velikost zřejmě souvisí s velikostí objektů, které se mají ve výsledku detekovat, tj. bude nutné ji nastavit podle typu vzorků
 # Nabízí se otázka jak tento parametr určit
