@@ -4,6 +4,7 @@ import numpy as np
 from tqdm.auto import tqdm
 from cracks.branches import sort_branch_pixels, path_direction
 import cracks.derivates
+import pandas as pd
 
 
 def attach_neigh_phases_to_skeleton_branch(branch_mask, phase_map):
@@ -105,30 +106,43 @@ def compute(crack_mask_smooth):
         - boundaryLength_px: The length of the boundary of the crack.
         - farthestPoints_px: The distance between the farthest points in the crack.
     """
+    if np.sum(crack_mask_smooth) == 0:
+        return []
+
     cracks_skeletons, skeleton_to_boundary_distance = cracks.derivates.skeleton(crack_mask_smooth)
     mask_labeled = label(crack_mask_smooth, background=0)
     crack_labels, cracks_areas_px = np.unique(mask_labeled, return_counts=True)
 
+    if len(crack_labels) <= 1:
+        return []
+
     out = []
-    # Skip label == 0 which is background
     for l, crack_area_px in tqdm(zip(crack_labels[1:], cracks_areas_px[1:]),
-                                 total=len(crack_labels),
+                                 total=len(crack_labels)-1, # Corrected total
                                  desc="Computing crack features"):
         crack_smooth = mask_labeled == l
         skeleton = np.logical_and(cracks_skeletons, crack_smooth)
         distance = skeleton_to_boundary_distance * skeleton
+        
+        if not np.any(skeleton):
+            avg_width = 0.0
+            max_width = 0.0
+        else:
+            max_width = np.max(distance)
+            avg_width = np.mean(distance[distance != 0])
 
         y, x = np.where(crack_smooth)
         length = (np.sqrt((np.max(x) - np.min(x)) ** 2 + (np.max(y) - np.min(y)) ** 2))
 
-        # Why there is not used just dilation and subtraction? Faster?
         left_top = (np.min(y), np.min(x))
         bottom_right = (np.max(y) + 1, np.max(x) + 1)
-        crack_bounding_box = mask_labeled[left_top[0]:bottom_right[0], left_top[1]: bottom_right[1]]
+        
+        crack_patch = crack_smooth[left_top[0]:bottom_right[0], left_top[1]: bottom_right[1]]
+        label_patch = mask_labeled[left_top[0]:bottom_right[0], left_top[1]: bottom_right[1]]
+
         marked = mark_boundaries(
-            np.pad(crack_smooth[left_top[0]: bottom_right[0], left_top[1]: bottom_right[1]],
-                   ((1, 1), (1, 1))),
-            np.pad(crack_bounding_box, ((1, 1), (1, 1))),
+            np.pad(crack_patch, ((1, 1), (1, 1))),
+            np.pad(label_patch, ((1, 1), (1, 1))),
             outline_color=(0.5, 0, 0),
             mode="outer"
         )
@@ -138,9 +152,22 @@ def compute(crack_mask_smooth):
             "label": l,
             "crackSize_px": crack_area_px,
             "skeleton_px": np.sum(skeleton),
-            "maxWidth_px": np.max(distance),
-            "avgWidth_px": np.mean(distance[distance != 0]),
+            "maxWidth_px": max_width,
+            "avgWidth_px": avg_width,
             "boundaryLength_px": len(boundary[0]),
             "farthestPoints_px": length
         })
+
     return out
+
+def global_summary(table: pd.DataFrame):
+    if table.empty: # no cracks at all
+        return pd.DataFrame({
+            "skeletonSum_px": [0],
+            "boundaryLengthSum_px": [0]
+        })
+        
+    return pd.DataFrame({
+        "skeletonSum_px": [np.sum(table["skeleton_px"])],
+        "boundaryLengthSum_px": [np.sum(table["boundaryLength_px"])]
+    })
