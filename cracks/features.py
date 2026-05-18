@@ -5,6 +5,14 @@ from tqdm.auto import tqdm
 from cracks.branches import sort_branch_pixels, path_direction
 import cracks.derivates
 import pandas as pd
+import matplotlib.pyplot as plt
+from cracks.projection import adaptive_closing, heal_chipped_mask
+from cracks.segment import pipeline_geometric
+import os
+import gc
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def attach_neigh_phases_to_skeleton_branch(branch_mask, phase_map):
@@ -94,7 +102,7 @@ def phase_analysis(crack_mask_smooth, phase_map):
     return through, edge, neighbors_map.astype(int), branches_map, gradient_map
 
 
-def compute(crack_mask_smooth):
+def compute_cracks(crack_mask_smooth):
     """
     @param crack_mask_smooth: A binary mask indicating the location of cracks in an image. Value of 1 indicates crack region, and 0 indicates background.
     @return: A list of dictionaries, each containing features of individual cracks:
@@ -160,14 +168,197 @@ def compute(crack_mask_smooth):
 
     return out
 
-def global_summary(table: pd.DataFrame):
-    if table.empty: # no cracks at all
-        return pd.DataFrame({
-            "skeletonSum_px": [0],
-            "boundaryLengthSum_px": [0]
-        })
+def compute_bubbles(bubble_mask_smooth):
+    """
+    @param bubble_mask_smooth: A binary mask indicating the location of bubbles in an image. Value of 1 indicates bubble region, and 0 indicates background.
+    @return: A list of dictionaries, each containing features of individual bubbles:
+        - label: The label of the bubble.
+        - bubbleArea_px: The size of the bubble in pixels.
+        - boundaryLength_px: The length of the boundary of the bubble.
+        - farthestPoints_px: The distance between the farthest points in the bubble's bounding box.
+    """
+    if np.sum(bubble_mask_smooth) == 0:
+        return []
+
+    mask_labeled = label(bubble_mask_smooth, background=0)
+    bubble_labels, bubbles_areas_px = np.unique(mask_labeled, return_counts=True)
+
+    if len(bubble_labels) <= 1:
+        return []
+
+    out = []
+    for l, bubble_area_px in tqdm(zip(bubble_labels[1:], bubbles_areas_px[1:]),
+                                 total=len(bubble_labels)-1,
+                                 desc="Computing bubble features"):
+        bubble_smooth = mask_labeled == l
+
+        y, x = np.where(bubble_smooth)
+        length = (np.sqrt((np.max(x) - np.min(x)) ** 2 + (np.max(y) - np.min(y)) ** 2))
+
+        left_top = (np.min(y), np.min(x))
+        bottom_right = (np.max(y) + 1, np.max(x) + 1)
         
-    return pd.DataFrame({
-        "skeletonSum_px": [np.sum(table["skeleton_px"])],
-        "boundaryLengthSum_px": [np.sum(table["boundaryLength_px"])]
+        bubble_patch = bubble_smooth[left_top[0]:bottom_right[0], left_top[1]: bottom_right[1]]
+        label_patch = mask_labeled[left_top[0]:bottom_right[0], left_top[1]: bottom_right[1]]
+
+        marked = mark_boundaries(
+            np.pad(bubble_patch, ((1, 1), (1, 1))),
+            np.pad(label_patch, ((1, 1), (1, 1))),
+            outline_color=(0.5, 0, 0),
+            mode="outer"
+        )
+        boundary = np.where(marked[:, :, 0] == 0.5)
+
+        out.append({
+            "label": l,
+            "bubbleArea_px": bubble_area_px,
+            "boundaryLength_px": len(boundary[0]),
+            "farthestPoints_px": length
+        })
+
+    return out
+
+
+def global_summary(crack_table: pd.DataFrame, bubble_table: pd.DataFrame):
+    res_table = pd.DataFrame({
+        "skeletonSum_px": [0.0],
+        "crackBoundaryLengthSum_px": [0.0],
+        "bubbleAreaSum_px": [0.0],
+        "bubbleBoundaryLengthSum_px": [0.0],
+        "bubbleCount": [0],
     })
+
+    if not crack_table.empty:
+        res_table["skeletonSum_px"] = np.sum(crack_table["skeleton_px"])
+        res_table["crackBoundaryLengthSum_px"] = np.sum(crack_table["boundaryLength_px"])
+
+    if not bubble_table.empty:
+        res_table["bubbleAreaSum_px"] = np.sum(bubble_table["bubbleArea_px"])
+        res_table["bubbleBoundaryLengthSum_px"] = np.sum(bubble_table["boundaryLength_px"])
+        res_table["bubbleCount"] = len(bubble_table)
+
+    return res_table
+
+def process_npy_to_features(npy_path, save_path):
+    if not isinstance(npy_path, str) or not os.path.exists(npy_path):
+        return pd.DataFrame()
+    
+    name = npy_path.split("/")[4]
+
+    is_exp = "after" in npy_path
+    stack = np.load(npy_path)
+
+    mask, _, _ = adaptive_closing(stack)
+    outer, inner = heal_chipped_mask(mask, inner_scale=0.85)
+
+    cracks, bubbles, diff_proj = pipeline_geometric(stack, outer, inner)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(diff_proj, cmap="gray")
+    ax.imshow(np.where(cracks > 0, 1, np.nan), cmap="Reds", vmin=0, vmax=1, alpha=0.8)
+    ax.imshow(np.where(bubbles > 0, 1, np.nan), cmap="Blues", vmin=0, vmax=1, alpha=0.8)
+    ax.set_title(f"{os.path.basename(npy_path)} {'After' if is_exp else 'Before'}", fontsize=12)
+    ax.axis('off')
+    plt.tight_layout()
+
+    plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    plt.close(fig)
+
+    table_cracks = compute_cracks(cracks)
+    table_bubbles = compute_bubbles(bubbles)
+    df_cracks = global_summary(pd.DataFrame(table_cracks), pd.DataFrame(table_bubbles))
+
+    df_cracks['sample_id'] = name
+
+    logger.info(f"Image: {npy_path} Stage: {'AFTER' if is_exp else 'before'} \n{df_cracks}")
+    
+    del stack, mask, outer, inner, cracks, bubbles
+    gc.collect()
+
+    return df_cracks
+
+def process_single_pair(idx, root, file_before, file_after):
+    pair_dir = os.path.join(root, "{:02d}".format(idx))
+    os.makedirs(pair_dir, exist_ok=True)
+    
+    name_before = os.path.splitext(os.path.basename(file_before))[0] + ".png"
+    name_after = os.path.splitext(os.path.basename(file_after))[0] + ".png"
+    
+    save_before = os.path.join(pair_dir, name_before)
+    save_after = os.path.join(pair_dir, name_after)
+    
+    df_before  = process_npy_to_features(file_before, save_before)
+    df_after = process_npy_to_features(file_after, save_after)
+    
+    df_before['stage'] = 'before'
+    df_before['pair_id'] = idx
+        
+    df_after['stage'] = 'after'
+    df_after['pair_id'] = idx
+    
+    logger.info("pair loaded")
+        
+    return df_before, df_after
+
+def process_pairs(pairs_df: pd.DataFrame, load_root, savedir, save_name, temperature_map):
+    results_dict = {}
+    col_before = 'Sample before exposure'
+    col_after = 'Sample after exposure'   
+
+    logger.info("Starting pair comparison iteration.")
+    for idx, row in tqdm(pairs_df.iterrows(), total=len(pairs_df), desc="Comparing pairs"):
+        file_before = os.path.join(load_root, str(row.get(col_before, '')))
+        file_after = os.path.join(load_root, str(row.get(col_after, '')))
+
+        logger.debug(f"Processing Pair {idx} - Before: {file_before} | After: {file_after}")
+
+        if not os.path.exists(file_before) or not os.path.exists(file_after):
+            logger.warning(f"Incomplete pair at index {idx}: Both files must exist. Skipping.")
+            continue
+
+        df_before, df_after = process_single_pair(idx, savedir, file_before, file_after)
+        results_dict[idx] = {
+            'before': df_before,
+            'after': df_after,
+        }
+
+    logger.info("Pair iteration complete. Aggregating results.")
+
+    all_before = [v['before'] for v in results_dict.values() if not v['before'].empty]
+    all_after = [v['after'] for v in results_dict.values() if not v['after'].empty]
+
+    if not all_before or not all_after:
+        logger.error("No valid pairs processed. Aborting aggregation.")
+        return
+
+    df_before_combined = pd.concat(all_before)
+    df_after_combined = pd.concat(all_after)
+
+    agg_before = df_before_combined.groupby('pair_id').agg({
+        **{col: 'sum' for col in df_before_combined.columns if col not in ['pair_id', 'sample_id']},
+        'sample_id': 'first'
+    })
+
+    agg_after = df_after_combined.groupby('pair_id').agg({
+        **{col: 'sum' for col in df_after_combined.columns if col not in ['pair_id', 'sample_id']},
+        'sample_id': 'first'
+    })
+
+    numeric_cols = agg_after.select_dtypes(include=[np.number]).columns
+    diff_df = agg_after[numeric_cols] - agg_before[numeric_cols]
+
+    agg_before_prefixed = agg_before[numeric_cols].add_prefix('before_')
+    agg_after_prefixed = agg_after[numeric_cols].add_prefix('after_')
+    diff_df_prefixed = diff_df.add_prefix('diff_')
+
+    side_by_side = pd.concat([agg_before_prefixed, agg_after_prefixed, diff_df_prefixed], axis=1)
+
+    side_by_side['sample_id'] = agg_before['sample_id']
+    side_by_side['temperature'] = side_by_side['sample_id'].map(temperature_map)
+
+    cols = ['sample_id', 'temperature'] + [c for c in side_by_side.columns if c not in ['sample_id', 'temperature']]
+    side_by_side = side_by_side[cols]
+
+    save_path = os.path.join(savedir, save_name)
+    side_by_side.to_csv(save_path)
+    logger.info(f"Results successfully saved to {save_path}")

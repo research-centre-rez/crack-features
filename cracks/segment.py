@@ -5,6 +5,7 @@ from skimage.morphology import disk, remove_small_objects, dilation , opening, c
 from skimage.measure import regionprops
 from skimage.filters import apply_hysteresis_threshold, meijering, frangi 
 from cracks.projection import synth_iqr
+from cracks.utils import peek
 
 def prune_skeleton(skel, min_branch_length=200):
     kernel = np.array([[1, 1, 1],
@@ -138,12 +139,11 @@ def detect_hybrid_cracks(crop_mask, proj, bubbles_to_ignore=None):
     
     return clean_cracks & crop_mask
 
-
 def detect_anomalies(proj, iqr, crop_mask):
     mask_tophat = detect_valleys_tophat(proj, crop_mask)
     mask_variance = detect_hybrid_cracks(crop_mask, iqr, bubbles_to_ignore=mask_tophat)
     
-    combined_anomalies = mask_variance | mask_tophat
+    combined_anomalies = mask_variance | mask_tophat  
     combined_anomalies = combined_anomalies & crop_mask
     
     return remove_small_objects(combined_anomalies.astype(bool), max_size=50)
