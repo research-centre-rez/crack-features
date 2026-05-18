@@ -24,7 +24,7 @@ import sys
 sys.path.append("../..")
 
 from cracks import features 
-from cracks.projection import heal_chipped_mask, adaptive_closing
+from cracks.projection import adaptive_closing, heal_chipped_mask
 from cracks.segment import pipeline_geometric
 
 ROOT_DIR = "../../experiment3_registered"
@@ -61,7 +61,7 @@ def process_npy_to_features(npy_path, save_path=None):
     mask, _, _ = adaptive_closing(stack)
     outer, inner = heal_chipped_mask(mask, inner_scale=0.85)
 
-    cracks, bubbles, diff_proj = pipeline_geometric(stack, outer & mask, inner)
+    cracks, bubbles, diff_proj = pipeline_geometric(stack, outer, inner)
 
     fig, ax = plt.subplots(figsize=(10, 10))
     ax.imshow(diff_proj, cmap="gray")
@@ -77,8 +77,9 @@ def process_npy_to_features(npy_path, save_path=None):
     else:
         plt.show()
 
-    table_cracks = features.compute(cracks)
-    df_cracks = features.global_summary(pd.DataFrame(table_cracks))
+    table_cracks = features.compute_cracks(cracks)
+    table_bubbles = features.compute_bubbles(bubbles)
+    df_cracks = features.global_summary(pd.DataFrame(table_cracks), pd.DataFrame(table_bubbles))
 
     df_cracks['sample_id'] = name
 
@@ -95,7 +96,7 @@ pairs_df = pd.read_csv(PAIRS_CSV)
 results_dict = {}
 col_before = 'Sample before exposure'
 col_after = 'Sample after exposure'   
-BASE_OUTPUT_DIR = "2026_05_06"
+BASE_OUTPUT_DIR = "2026_05_17"
 
 for idx, row in tqdm(pairs_df.iterrows(), total=len(pairs_df), desc="Comparing pairs"):
     file_before = os.path.join(ROOT_DIR, str(row.get(col_before, '')))
@@ -167,5 +168,5 @@ cols = ['sample_id', 'temperature'] + [c for c in side_by_side.columns if c not 
 side_by_side = side_by_side[cols]
 
 display(side_by_side)
-side_by_side.to_csv("2026_05_06_cracks_hybrid.csv")
+side_by_side.to_csv("2026_05_18_cracks_hybrid.csv")
 ```
