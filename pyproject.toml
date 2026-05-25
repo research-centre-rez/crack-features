@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cracks"
+version = "0.1.0"
+description = "Concrete segmentation tool"
+dependencies = [
+    "numpy",
+    "pandas",
+    "opencv-python-headless",
+    "scikit-image",
+    "scipy",
+    "tqdm",
+    "matplotlib",
+    "shapely",
+]
+
+[project.scripts]
+concrete-cracks = "main:main"
