@@ -17,7 +17,11 @@ docker build -t cracks .
 Run it with
 
 ```bash
-docker run --rm     -v $(pwd)/<experiment_path>:/data     cracks     --root_dir /data/
+docker run --rm \
+    -v $(pwd):/workspace \
+    -w /workspace \
+    cracks \
+    --root_dir /workspace<experiment_path>/
 ```
 replacting `<experiment_path>` with the path to your prepared folder. The folder has the following structure.
 

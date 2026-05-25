@@ -13,4 +13,4 @@ COPY cracks/ cracks/
 COPY utils/ utils/
 COPY main.py .
 
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["python", "/app/main.py"]
