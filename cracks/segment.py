@@ -157,7 +157,7 @@ def refine_cracks_by_skeleton(thick_cracks, min_branch_length):
 
     return dilated
 
-def pipeline_geometric(stack, circle_mask, small_circle):
+def pipeline_geometric(stack, circle_mask, small_circle, GLOBAL_IQR_SCALE=99.7):
     y_idx, x_idx = np.where(circle_mask == 1)
         
     ymin, ymax = np.min(y_idx), np.max(y_idx)
@@ -166,9 +166,11 @@ def pipeline_geometric(stack, circle_mask, small_circle):
     crop_mask = circle_mask[ymin:ymax+1, xmin:xmax+1]
     crop_stack = stack[:, ymin:ymax+1, xmin:xmax+1]
     
-    subset_stack = crop_stack[::40, :, :] # avoid sorting the entire stack
-    q_low_proj = np.quantile(subset_stack, 0.05, axis=0).astype(np.float32)
-    diff_proj = synth_iqr(subset_stack, crop_mask)
+    subset_stack = crop_stack[::40, :, :]
+    q_low_proj = np.quantile(subset_stack, 0.10, axis=0).astype(np.float32)
+    raw_diff_proj = synth_iqr(subset_stack, crop_mask)
+    diff_proj = (raw_diff_proj / GLOBAL_IQR_SCALE) * 255.0
+    diff_proj = np.clip(diff_proj, 0, 255).astype(np.float32)
 
     anomalies = detect_anomalies(q_low_proj, diff_proj, crop_mask)
     
