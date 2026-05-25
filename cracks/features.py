@@ -253,17 +253,35 @@ def process_npy_to_features(npy_path, save_path):
 
     cracks, bubbles, diff_proj = pipeline_geometric(stack, outer, inner)
 
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(diff_proj, cmap="gray")
-    ax.imshow(np.where(cracks > 0, 1, np.nan), cmap="Reds", vmin=0, vmax=1, alpha=0.8)
-    ax.imshow(np.where(bubbles > 0, 1, np.nan), cmap="Blues", vmin=0, vmax=1, alpha=0.8)
-    ax.set_title(f"{os.path.basename(npy_path)} {'After' if is_exp else 'Before'}", fontsize=12)
-    ax.axis('off')
-    plt.tight_layout()
+    # 1. First Image: Pure Mask (cracks and bubbles over black background)
+    fig1, ax1 = plt.subplots(figsize=(10, 10))
+    
+    ax1.imshow(np.zeros_like(diff_proj), cmap="gray", vmin=0, vmax=1) 
+    ax1.imshow(np.where(cracks > 0, 1, np.nan), cmap="Reds", vmin=0, vmax=1, alpha=0.8)
+    ax1.imshow(np.where(bubbles > 0, 1, np.nan), cmap="Blues", vmin=0, vmax=1, alpha=0.8)
+    
+    # Remove all borders, labels, and spacing
+    ax1.axis('off')
+    fig1.subplots_adjust(left=0, right=1, bottom=0, top=1)
+    
+    plt.savefig(save_path, bbox_inches='tight', pad_inches=0, dpi=300)
+    plt.close(fig1)
 
-    plt.savefig(save_path, bbox_inches='tight', dpi=300)
-    plt.close(fig)
+    # 2. Second Image: Pure Projection (diff_proj)
+    base_path, ext = os.path.splitext(save_path)
+    projection_save_path = f"{base_path}_projection{ext}"
 
+    fig2, ax2 = plt.subplots(figsize=(10, 10))
+    ax2.imshow(diff_proj, cmap="gray")
+    
+    # Remove all borders, labels, and spacing
+    ax2.axis('off')
+    fig2.subplots_adjust(left=0, right=1, bottom=0, top=1)
+    
+    plt.savefig(projection_save_path, bbox_inches='tight', pad_inches=0, dpi=300)
+    plt.close(fig2)
+
+    # Features processing
     table_cracks = compute_cracks(cracks)
     table_bubbles = compute_bubbles(bubbles)
     df_cracks = global_summary(pd.DataFrame(table_cracks), pd.DataFrame(table_bubbles))
@@ -272,7 +290,7 @@ def process_npy_to_features(npy_path, save_path):
 
     logger.info(f"Image: {npy_path} Stage: {'AFTER' if is_exp else 'before'} \n{df_cracks}")
     
-    del stack, mask, outer, inner, cracks, bubbles
+    del stack, mask, outer, inner, cracks, bubbles, diff_proj
     gc.collect()
 
     return df_cracks
