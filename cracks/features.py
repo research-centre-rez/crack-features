@@ -243,9 +243,7 @@ def process_npy_to_features(npy_path, save_path):
     if not isinstance(npy_path, str) or not os.path.exists(npy_path):
         return pd.DataFrame()
     
-    name = npy_path.split("/")[4]
-
-    is_exp = "after" in npy_path
+    name = os.path.basename(os.path.dirname(npy_path))
     stack = np.load(npy_path)
 
     mask, _, _ = adaptive_closing(stack)
@@ -253,130 +251,92 @@ def process_npy_to_features(npy_path, save_path):
 
     cracks, bubbles, diff_proj = pipeline_geometric(stack, outer, inner)
 
-    # 1. First Image: Pure Mask (cracks and bubbles over black background)
     fig1, ax1 = plt.subplots(figsize=(10, 10))
-    
     ax1.imshow(np.zeros_like(diff_proj), cmap="gray", vmin=0, vmax=1) 
     ax1.imshow(np.where(cracks > 0, 1, np.nan), cmap="Reds", vmin=0, vmax=1, alpha=0.8)
     ax1.imshow(np.where(bubbles > 0, 1, np.nan), cmap="Blues", vmin=0, vmax=1, alpha=0.8)
-    
-    # Remove all borders, labels, and spacing
     ax1.axis('off')
+
     fig1.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    
     plt.savefig(save_path, bbox_inches='tight', pad_inches=0, dpi=300)
     plt.close(fig1)
 
-    # 2. Second Image: Pure Projection (diff_proj)
     base_path, ext = os.path.splitext(save_path)
     projection_save_path = f"{base_path}_projection{ext}"
 
     fig2, ax2 = plt.subplots(figsize=(10, 10))
     ax2.imshow(diff_proj, cmap="gray")
-    
-    # Remove all borders, labels, and spacing
     ax2.axis('off')
     fig2.subplots_adjust(left=0, right=1, bottom=0, top=1)
     
     plt.savefig(projection_save_path, bbox_inches='tight', pad_inches=0, dpi=300)
     plt.close(fig2)
 
-    # Features processing
     table_cracks = compute_cracks(cracks)
     table_bubbles = compute_bubbles(bubbles)
-    df_cracks = global_summary(pd.DataFrame(table_cracks), pd.DataFrame(table_bubbles))
+    df_metrics = global_summary(pd.DataFrame(table_cracks), pd.DataFrame(table_bubbles))
 
-    df_cracks['sample_id'] = name
-
-    logger.info(f"Image: {npy_path} Stage: {'AFTER' if is_exp else 'before'} \n{df_cracks}")
+    df_metrics['sample_id'] = name
+    logger.info(f"Image: {npy_path}\n{df_metrics}")
     
     del stack, mask, outer, inner, cracks, bubbles, diff_proj
     gc.collect()
 
-    return df_cracks
+    return df_metrics
 
-def process_single_pair(idx, root, file_before, file_after):
-    pair_dir = os.path.join(root, "{:02d}".format(idx))
-    os.makedirs(pair_dir, exist_ok=True)
-    
-    name_before = os.path.splitext(os.path.basename(file_before))[0] + ".png"
-    name_after = os.path.splitext(os.path.basename(file_after))[0] + ".png"
-    
-    save_before = os.path.join(pair_dir, name_before)
-    save_after = os.path.join(pair_dir, name_after)
-    
-    df_before  = process_npy_to_features(file_before, save_before)
-    df_after = process_npy_to_features(file_after, save_after)
-    
-    df_before['stage'] = 'before'
-    df_before['pair_id'] = idx
-        
-    df_after['stage'] = 'after'
-    df_after['pair_id'] = idx
-    
-    logger.info("pair loaded")
-        
-    return df_before, df_after
+def process_groups(groups, savedir: str, save_name: str):
+    logger.info("Sequence processing start")
 
-def process_pairs(pairs_df: pd.DataFrame, load_root, savedir, save_name, temperature_map):
-    results_dict = {}
-    col_before = 'Sample before exposure'
-    col_after = 'Sample after exposure'   
+    summaries = []
 
-    logger.info("Starting pair comparison iteration.")
-    for idx, row in tqdm(pairs_df.iterrows(), total=len(pairs_df), desc="Comparing pairs"):
-        file_before = os.path.join(load_root, str(row.get(col_before, '')))
-        file_after = os.path.join(load_root, str(row.get(col_after, '')))
-
-        logger.debug(f"Processing Pair {idx} - Before: {file_before} | After: {file_after}")
-
-        if not os.path.exists(file_before) or not os.path.exists(file_after):
-            logger.warning(f"Incomplete pair at index {idx}: Both files must exist. Skipping.")
+    for group_idx, (folder_path, npy_files) in enumerate(tqdm(groups.items(), desc="Processing subdirectories")):
+        group_name = os.path.basename(folder_path)
+        if len(npy_files) < 2:
+            logger.warning(f"Skipping folder {group_name}: at least two pieces needed for std+mean eval")
             continue
 
-        df_before, df_after = process_single_pair(idx, savedir, file_before, file_after)
-        results_dict[idx] = {
-            'before': df_before,
-            'after': df_after,
-        }
+        group_dir = os.path.join(savedir, "{:02d}".format(group_idx))
+        os.makedirs(group_dir, exist_ok=True)
 
-    logger.info("Pair iteration complete. Aggregating results.")
+        group_frames = []
+        for matrix_path in npy_files:
+            matrix_name = os.path.splitext(os.path.basename(matrix_path))[0] + ".png"
+            matrix_savepath = os.path.join(group_dir, matrix_name)
 
-    all_before = [v['before'] for v in results_dict.values() if not v['before'].empty]
-    all_after = [v['after'] for v in results_dict.values() if not v['after'].empty]
+            df_feats = process_npy_to_features(matrix_path, matrix_savepath)
+            if not df_feats.empty:
+                group_frames.append(df_feats)
 
-    if not all_before or not all_after:
-        logger.error("No valid pairs processed. Aborting aggregation.")
+        if not group_frames:
+            continue
+
+        flat_group = pd.concat(group_frames, ignore_index=True)
+        cols = flat_group.select_dtypes(include=[np.number]).columns
+
+        mean_prof = flat_group[cols].mean().to_dict()
+        std_prof = flat_group[cols].std(ddof=1).to_dict()
+
+        stat_data = {}
+        for col in cols:
+            stat_data[f"mean_{col}"] = mean_prof[col]
+            stat_data[f"std_{col}"] = std_prof[col]
+
+        stat_data['sample_id'] = group_name
+        stat_data['scan_count'] = len(group_frames)
+        # tempearature?
+
+        summaries.append(stat_data)
+
+    if not summaries:
+        logger.error("No datasets were processesd")
         return
+    
+    output_frame = pd.DataFrame(summaries)
+    meta_cols = ['sample_id', 'scan_count']
+    feat_cols = [c for c in output_frame.columns if c not in meta_cols]
+    output_frame = output_frame[meta_cols + feat_cols]
 
-    df_before_combined = pd.concat(all_before)
-    df_after_combined = pd.concat(all_after)
+    csv_path = os.path.join(savedir, save_name)
+    output_frame.to_csv(csv_path, index=False)
+    logger.info(f"Variance matrix recorded to {csv_path}")
 
-    agg_before = df_before_combined.groupby('pair_id').agg({
-        **{col: 'sum' for col in df_before_combined.columns if col not in ['pair_id', 'sample_id']},
-        'sample_id': 'first'
-    })
-
-    agg_after = df_after_combined.groupby('pair_id').agg({
-        **{col: 'sum' for col in df_after_combined.columns if col not in ['pair_id', 'sample_id']},
-        'sample_id': 'first'
-    })
-
-    numeric_cols = agg_after.select_dtypes(include=[np.number]).columns
-    diff_df = agg_after[numeric_cols] - agg_before[numeric_cols]
-
-    agg_before_prefixed = agg_before[numeric_cols].add_prefix('before_')
-    agg_after_prefixed = agg_after[numeric_cols].add_prefix('after_')
-    diff_df_prefixed = diff_df.add_prefix('diff_')
-
-    side_by_side = pd.concat([agg_before_prefixed, agg_after_prefixed, diff_df_prefixed], axis=1)
-
-    side_by_side['sample_id'] = agg_before['sample_id']
-    side_by_side['temperature'] = side_by_side['sample_id'].map(temperature_map)
-
-    cols = ['sample_id', 'temperature'] + [c for c in side_by_side.columns if c not in ['sample_id', 'temperature']]
-    side_by_side = side_by_side[cols]
-
-    save_path = os.path.join(savedir, save_name)
-    side_by_side.to_csv(save_path)
-    logger.info(f"Results successfully saved to {save_path}")
