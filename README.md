@@ -1,7 +1,9 @@
 # Crack-features
+
 ## Installation
 
 ### Local
+
 Clone the repository, create a fresh virtual environment. Install the editable version of the package with
 
 ```bash
@@ -9,7 +11,9 @@ pip install -e .
 ```
 
 ### Docker
+
 Build the image
+
 ```bash
 docker build -t cracks .
 ```
@@ -19,44 +23,39 @@ Run it with
 ```bash
 docker run --rm \
     -v $(pwd):/workspace \
+    -v <path_to_data_on_host>:/data \
     -w /workspace \
     cracks \
     --root_dir /workspace<experiment_path>/
 ```
+
 replacting `<experiment_path>` with the path to your prepared folder. The folder has the following structure.
 
 ## Experiment structure
-- `before_after.csv` - measured pair paths
-- `temp_spec.json` - concrete samples matched to their exposed temperatures
-- `after_expo` - containting .npy stacks
-- `before_expo` - containting .npy stacks
+
+- `after` - containting .npy stacks
+- `before` - containting .npy stacks
 
 ## Output format
+
 Contents created during each experiment run
 
 `concrete_processed.csv` - cracks/bubbles measurements
 
-- `temperature` - specified by `temp_spec.json`
-- `before_skeletonSum_px` - area of the skeleton before exposure
-- `after_skeletonSum_px` - area of the skeleton after exposure
-- `diff_skeletonSum_px` - difference, invariant: should grow
+- `group_name` - name of the subdirectory
 
-- `before_crackBoundaryLengthSum_px` - length of the boundary before exposure
-- `after_crackBoundaryLengthSum_px` - length of the boundary after exposure
-- `diff_crackBoundaryLengthSum_px` - difference, no invariant for now
+- `skeletonSum_px` - skeleton area measurements for the group
 
-- `before_bubbleAreaSum_px` 
-- `after_bubbleAreaSum_px` 
-- `diff_bubbleAreaSum_px` 
+- `crackBoundaryLengthSum_px` - boundary length measurements for the group
 
-- `before_bubbleBoundaryLengthSum_px` - length of the boundary before exposure
-- `after_bubbleBoundaryLengthSum_px` - length of the boundary after exposure
-- `diff_bubbleBoundaryLengthSum_px` - difference, no invariant for now
+- `bubbleAreaSum_px` - bubble area measurements for the group
 
-- `before_bubbleCount_px` - number of bubble connected components before
-- `after_bubbleCount_px` - number of bubble connected components after 
-- `diff_bubbleCount_px` - difference
+- `bubbleBoundaryLengthSum_px` - bubble boundary length measurements for the group
 
-For each pair:
-- before/after IQR projection
-- segmented cracks (red) and bubbles (blue) for both stages
+- `bubbleCount_px` - number of uniquely segmented bubbles in the group
+
+For each processed file:
+
+Synthetic IQR projection visualization
+Segmented cracks (red) and bubbles (blue) masks
+

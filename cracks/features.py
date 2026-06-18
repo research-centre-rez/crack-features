@@ -244,7 +244,7 @@ def process_npy_to_features(npy_path, save_path):
         return pd.DataFrame()
     
     name = os.path.basename(os.path.dirname(npy_path))
-    stack = np.load(npy_path)
+    stack = np.load(npy_path, mmap_mode='r')
 
     mask, _, _ = adaptive_closing(stack)
     outer, inner = heal_chipped_mask(mask, inner_scale=0.85)
