@@ -244,45 +244,49 @@ def process_npy_to_features(npy_path, save_path):
         return pd.DataFrame()
     
     name = os.path.basename(os.path.dirname(npy_path))
-    stack = np.load(npy_path, mmap_mode='r')
+    try:
+        stack = np.load(npy_path, mmap_mode='r')
 
-    mask, _, _ = adaptive_closing(stack)
-    outer, inner = heal_chipped_mask(mask, inner_scale=0.85)
+        mask, _, _ = adaptive_closing(stack)
+        outer, inner = heal_chipped_mask(mask, inner_scale=0.85)
 
-    cracks, bubbles, diff_proj = pipeline_geometric(stack, outer, inner)
+        cracks, bubbles, diff_proj = pipeline_geometric(stack, outer, inner)
 
-    fig1, ax1 = plt.subplots(figsize=(10, 10))
-    ax1.imshow(np.zeros_like(diff_proj), cmap="gray", vmin=0, vmax=1) 
-    ax1.imshow(np.where(cracks > 0, 1, np.nan), cmap="Reds", vmin=0, vmax=1, alpha=0.8)
-    ax1.imshow(np.where(bubbles > 0, 1, np.nan), cmap="Blues", vmin=0, vmax=1, alpha=0.8)
-    ax1.axis('off')
+        fig1, ax1 = plt.subplots(figsize=(10, 10))
+        ax1.imshow(np.zeros_like(diff_proj), cmap="gray", vmin=0, vmax=1)
+        ax1.imshow(np.where(cracks > 0, 1, np.nan), cmap="Reds", vmin=0, vmax=1, alpha=0.8)
+        ax1.imshow(np.where(bubbles > 0, 1, np.nan), cmap="Blues", vmin=0, vmax=1, alpha=0.8)
+        ax1.axis('off')
 
-    fig1.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    plt.savefig(save_path, bbox_inches='tight', pad_inches=0, dpi=300)
-    plt.close(fig1)
+        fig1.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        plt.savefig(save_path, bbox_inches='tight', pad_inches=0, dpi=300)
+        plt.close(fig1)
 
-    base_path, ext = os.path.splitext(save_path)
-    projection_save_path = f"{base_path}_projection{ext}"
+        base_path, ext = os.path.splitext(save_path)
+        projection_save_path = f"{base_path}_projection{ext}"
 
-    fig2, ax2 = plt.subplots(figsize=(10, 10))
-    ax2.imshow(diff_proj, cmap="gray")
-    ax2.axis('off')
-    fig2.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    
-    plt.savefig(projection_save_path, bbox_inches='tight', pad_inches=0, dpi=300)
-    plt.close(fig2)
+        fig2, ax2 = plt.subplots(figsize=(10, 10))
+        ax2.imshow(diff_proj, cmap="gray")
+        ax2.axis('off')
+        fig2.subplots_adjust(left=0, right=1, bottom=0, top=1)
 
-    table_cracks = compute_cracks(cracks)
-    table_bubbles = compute_bubbles(bubbles)
-    df_metrics = global_summary(pd.DataFrame(table_cracks), pd.DataFrame(table_bubbles))
+        plt.savefig(projection_save_path, bbox_inches='tight', pad_inches=0, dpi=300)
+        plt.close(fig2)
 
-    df_metrics['sample_id'] = name
-    logger.info(f"Image: {npy_path}\n{df_metrics}")
-    
-    del stack, mask, outer, inner, cracks, bubbles, diff_proj
-    gc.collect()
+        table_cracks = compute_cracks(cracks)
+        table_bubbles = compute_bubbles(bubbles)
+        df_metrics = global_summary(pd.DataFrame(table_cracks), pd.DataFrame(table_bubbles))
 
-    return df_metrics
+        df_metrics['sample_id'] = name
+        logger.info(f"Image: {npy_path}\n{df_metrics}")
+
+        del stack, mask, outer, inner, cracks, bubbles, diff_proj
+        gc.collect()
+
+        return df_metrics
+    except Exception as e:
+        logger.error(f"Error processing {npy_path}: {e}")
+        return pd.DataFrame()
 
 def process_groups(groups, savedir: str, save_name: str):
     logger.info("Sequence processing start")
