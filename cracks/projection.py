@@ -43,7 +43,9 @@ def adaptive_closing(stack, threshold=10):
 
 def heal_chipped_mask(binary_mask, inner_scale=0.8):
     contours, _ = cv2.findContours(binary_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+    if len(contours) == 0:
+        return np.zeros_like(binary_mask), np.zeros_like(binary_mask)
+
     largest_contour = max(contours, key=cv2.contourArea)
     
     hull = cv2.convexHull(largest_contour)
