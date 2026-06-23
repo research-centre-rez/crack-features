@@ -159,6 +159,9 @@ def refine_cracks_by_skeleton(thick_cracks, min_branch_length):
 
 def pipeline_geometric(stack, circle_mask, small_circle, GLOBAL_IQR_SCALE=99.7):
     y_idx, x_idx = np.where(circle_mask == 1)
+
+    if len(y_idx) == 0:
+        return np.zeros_like(circle_mask), np.zeros_like(circle_mask), np.zeros_like(circle_mask)
         
     ymin, ymax = np.min(y_idx), np.max(y_idx)
     xmin, xmax = np.min(x_idx), np.max(x_idx)
