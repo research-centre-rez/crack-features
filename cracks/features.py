@@ -243,7 +243,8 @@ def process_npy_to_features(npy_path, save_path):
     if not isinstance(npy_path, str) or not os.path.exists(npy_path):
         return pd.DataFrame()
     
-    name = os.path.basename(os.path.dirname(npy_path))
+    name = os.path.splitext(os.path.basename(npy_path))[0]
+
     try:
         stack = np.load(npy_path)
     except EOFError:
@@ -311,12 +312,12 @@ def process_groups(groups, savedir: str, save_name: str):
             matrix_savepath = os.path.join(group_dir, matrix_name)
 
             df_feats = process_npy_to_features(matrix_path, matrix_savepath)
+
             if df_feats is None:
                 logger.warning(f"Skipping  entry in group {group_name}")
                 continue
             if not df_feats.empty:
                 df_feats['group_name'] = group_name
-                df_feats['sample_id'] = os.path.splitext(os.path.basename(matrix_path))[0]
                 group_frames.append(df_feats)
 
         flat_group = pd.concat(group_frames, ignore_index=True)
@@ -332,12 +333,15 @@ def process_groups(groups, savedir: str, save_name: str):
         
         group_means = flat_group[numeric_cols].mean().add_prefix('mean_')
         group_stds = flat_group[numeric_cols].std().add_prefix('std_')
-        
-        summary_row = pd.concat([group_means, group_stds])
+
+        means_df = group_means.to_frame().T
+        stds_df = group_stds.to_frame().T
+        summary_row = pd.concat([means_df, stds_df], axis=1)
+
         summary_row['sample_id'] = group_name
         summary_row['scan_count'] = len(flat_group)
-        
-        summaries.append(summary_row.to_frame().T)
+
+        summaries.append(summary_row)
 
     if not summaries:
         logger.error("No datasets were processesd")

@@ -31,7 +31,7 @@ def main():
     logger.info(f"Initializing processing with ROOT_DIR: {root_dir}")
     logger.info(f"Loaded {len(groups)} groups")
 
-    out_dir = get_date_name()
+    out_dir = "measurements/" + get_date_name()
     os.makedirs(out_dir, exist_ok=True)
     logger.info(f"Saving outputs to directory: {out_dir}")
 
