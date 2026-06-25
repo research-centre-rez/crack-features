@@ -34,7 +34,7 @@ def adaptive_closing(stack, threshold=10):
     raw_mask = (np.min(stack, axis=0) >= intensity_threshold).astype(np.uint8)
     closed = np.copy(raw_mask)
     
-    while np.unique(label(closed)).size > 2 or morph_size > 100:
+    while np.unique(label(closed)).size > 2 or morph_size < 20:
         morph_size += 2
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_size, morph_size))
         closed = cv2.morphologyEx((np.min(stack, axis=0) >= 10).astype(np.uint8), cv2.MORPH_CLOSE, kernel)
