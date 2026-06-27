@@ -246,7 +246,7 @@ def process_npy_to_features(npy_path, save_path):
     name = os.path.splitext(os.path.basename(npy_path))[0]
 
     try:
-        stack = np.load(npy_path)
+        stack = np.load(npy_path)[30:-30]
     except EOFError:
         logger.error(f"{npy_path} is incomplete")
         return None
